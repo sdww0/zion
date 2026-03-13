@@ -28,6 +28,7 @@
 #include <sbi_utils/ipi/fdt_ipi.h>
 #include <sbi_utils/reset/fdt_reset.h>
 #include <sbi_utils/serial/semihosting.h>
+#include "../../zion/src/zion.h"
 
 /* List of platform override modules generated at compile time */
 extern const struct platform_override *platform_override_modules[];
@@ -242,6 +243,8 @@ static int generic_final_init(bool cold_boot)
 		if (rc)
 			return rc;
 	}
+
+    zion_init(cold_boot);
 
 	if (!cold_boot)
 		return 0;

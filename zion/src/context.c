@@ -1,0 +1,429 @@
+
+#include <sbi/sbi_types.h>
+#include <sbi/riscv_encoding.h>
+#include <sbi/sbi_trap.h>
+#include <sbi/sbi_console.h>
+#include <sbi/sbi_hfence.h>
+#include <sbi/riscv_asm.h>
+#include "context.h"
+#include "cvm.h"
+#include "ree.h"
+#include "pmp.h"
+
+extern int tee_region_id;
+
+#define GUEST_ARG_REG_LIST(_) \
+	_(a0)                 \
+	_(a1)                 \
+	_(a2)                 \
+	_(a3)                 \
+	_(a4)                 \
+	_(a5)                 \
+	_(a6)                 \
+	_(a7)
+
+#define GUEST_INIT_REG_LIST(_) \
+	_(ra)                  \
+	_(sp)                  \
+	_(gp)                  \
+	_(tp)                  \
+	_(t0)                  \
+	_(t1)                  \
+	_(t2)                  \
+	_(s0)                  \
+	_(s1)                  \
+	GUEST_ARG_REG_LIST(_)  \
+	_(s2)                  \
+	_(s3)                  \
+	_(s4)                  \
+	_(s5)                  \
+	_(s6)                  \
+	_(s7)                  \
+	_(s8)                  \
+	_(s9)                  \
+	_(s10)                 \
+	_(s11)                 \
+	_(t3)                  \
+	_(t4)                  \
+	_(t5)                  \
+	_(t6)
+
+#define GUEST_SAVED_REG_SANITY_LIST(_) \
+	_("S2", s2)                    \
+	_("S3", s3)                    \
+	_("S4", s4)                    \
+	_("S5", s5)                    \
+	_("S6", s6)                    \
+	_("S7", s7)                    \
+	_("S8", s8)                    \
+	_("S9", s9)                    \
+	_("S10", s10)
+
+/* HOST */
+static const unsigned long ree_mideleg =
+	MIP_SSIP | MIP_VSSIP | MIP_STIP | MIP_VSTIP | MIP_SEIP | MIP_VSEIP |
+	MIP_SGEIP;
+static const unsigned long ree_hideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const unsigned long ree_medeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_VIRTUAL_SUPERVISOR_ECALL) |
+	(1U << CAUSE_FETCH_PAGE_FAULT) | (1U << CAUSE_LOAD_PAGE_FAULT) |
+	(1U << CAUSE_STORE_PAGE_FAULT) | (1U << CAUSE_FETCH_GUEST_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_GUEST_PAGE_FAULT) | (1U << CAUSE_VIRTUAL_INST_FAULT) |
+	(1U << CAUSE_STORE_GUEST_PAGE_FAULT);
+static const unsigned long ree_hedeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+
+/* TVM */
+static const unsigned long cvm_mideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const unsigned long cvm_hideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const unsigned long cvm_medeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+static const unsigned long cvm_hedeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+
+static bool invalid_registers_print = false;
+static const unsigned long guest_saved_reg_reset_sentinel = 0x1234;
+
+static bool sanitize_guest_saved_reg(const char *reg_name,
+				     unsigned long *reg_value)
+{
+	if (*reg_value == 0)
+		return false;
+
+	sbi_printf("[SM] TEE security check: %s register mismatch, value: %lx\n",
+		   reg_name, *reg_value);
+	if (*reg_value == guest_saved_reg_reset_sentinel)
+		*reg_value = 0;
+
+	return true;
+}
+
+static void check_guest_saved_regs(struct kvm_vcpu_channel *channel)
+{
+	if (invalid_registers_print)
+		return;
+
+#define CHECK_SAVED_REG(label, field)                                          \
+	invalid_registers_print |=                                             \
+		sanitize_guest_saved_reg(label, &channel->guest_context->field);
+	GUEST_SAVED_REG_SANITY_LIST(CHECK_SAVED_REG)
+#undef CHECK_SAVED_REG
+}
+
+static inline void copy_guest_arg_regs_to_trap_regs(
+	struct sbi_trap_regs *regs, const struct kvm_cpu_context *guest_context)
+{
+#define COPY_GUEST_ARG_TO_TRAP(field) regs->field = guest_context->field;
+	GUEST_ARG_REG_LIST(COPY_GUEST_ARG_TO_TRAP)
+#undef COPY_GUEST_ARG_TO_TRAP
+}
+
+static inline void copy_guest_init_regs_to_trap_regs(
+	struct sbi_trap_regs *regs, const struct kvm_cpu_context *guest_context)
+{
+#define COPY_GUEST_INIT_TO_TRAP(field) regs->field = guest_context->field;
+	GUEST_INIT_REG_LIST(COPY_GUEST_INIT_TO_TRAP)
+#undef COPY_GUEST_INIT_TO_TRAP
+}
+
+static inline void copy_trap_arg_regs_to_guest_context(
+	struct kvm_cpu_context *guest_context, const struct sbi_trap_regs *regs)
+{
+#define COPY_TRAP_ARG_TO_GUEST(field) guest_context->field = regs->field;
+	GUEST_ARG_REG_LIST(COPY_TRAP_ARG_TO_GUEST)
+#undef COPY_TRAP_ARG_TO_GUEST
+}
+
+static inline void sync_trap_pc_from_guest(struct sbi_trap_regs *regs,
+					   struct kvm_vcpu_channel *channel)
+{
+	regs->mepc = channel->guest_context->sepc;
+	check_guest_saved_regs(channel);
+}
+
+static inline void get_cvm_status_from_ree(struct sbi_trap_regs *regs,
+					   tee_quit_cause exit_cause,
+					   struct exit_mmio_reg *exit_mmio_reg,
+					   struct kvm_vcpu_channel *channel)
+{
+	csr_write(CSR_SSTATUS, channel->guest_context->sstatus);
+
+	switch (exit_cause) {
+	case CVM_EXIT_MMIO_STORE:
+	case CVM_EXIT_VIRT_INST:
+		sync_trap_pc_from_guest(regs, channel);
+		break;
+	case CVM_EXIT_MMIO_LOAD:
+		zion_printf(
+			"[SM] CVM_EXIT_MMIO_LOAD, load value before ree, value: 0x%lx\n",
+			((unsigned long *)regs)[exit_mmio_reg->rd_offset]);
+
+		((unsigned long *)regs)[exit_mmio_reg->rd_offset] =
+			((unsigned long *)channel
+				 ->guest_context)[exit_mmio_reg->rd_offset];
+
+		zion_printf(
+			"[SM] CVM_EXIT_MMIO_LOAD, load value from ree, value: 0x%lx\n",
+			((unsigned long *)regs)[exit_mmio_reg->rd_offset]);
+
+		sync_trap_pc_from_guest(regs, channel);
+		break;
+	case CVM_EXIT_SBI_CALL:
+		copy_guest_arg_regs_to_trap_regs(regs,
+						 channel->guest_context);
+		sync_trap_pc_from_guest(regs, channel);
+		break;
+	case TEE_INIT:
+		copy_guest_init_regs_to_trap_regs(regs,
+						  channel->guest_context);
+		regs->mepc = channel->guest_context->sepc;
+		break;
+	default:
+		break;
+	}
+}
+
+static inline void put_cvm_status_to_ree(struct sbi_trap_regs *regs,
+					 tee_quit_cause exit_cause,
+					 struct exit_mmio_reg *exit_mmio_reg,
+					 struct cvm_extra_trap_info *extra_trap,
+					 struct kvm_vcpu_channel *channel)
+{
+	channel->guest_context->sstatus = csr_read(CSR_SSTATUS);
+
+	if (extra_trap) {
+		channel->extra_trap->htinst	= extra_trap->htinst;
+		channel->extra_trap->htinst_len = extra_trap->htinst_len;
+	}
+
+	switch (exit_cause) {
+	case CVM_EXIT_MMIO_STORE:
+		((unsigned long *)
+			 channel->guest_context)[exit_mmio_reg->rs2_offset] =
+			((unsigned long *)regs)[exit_mmio_reg->rs2_offset];
+		zion_printf(
+			"[SM] CVM_EXIT_MMIO_STORE, store value to ree, value: 0x%lx\n",
+			((unsigned long *)regs)[exit_mmio_reg->rs2_offset]);
+		channel->guest_context->sepc = regs->mepc;
+		break;
+	case CVM_EXIT_MMIO_LOAD:
+	case CVM_EXIT_VIRT_INST:
+		channel->guest_context->sepc = regs->mepc;
+		break;
+	case CVM_EXIT_SBI_CALL:
+		copy_trap_arg_regs_to_guest_context(channel->guest_context,
+						    regs);
+		channel->guest_context->sepc = regs->mepc;
+		break;
+	case CVM_EXIT_INTERRUPT:
+	case CVM_EXIT_SHARED_MEM_PAGE_FAULT:
+		break;
+	default:
+		if (exit_cause != CVM_EXIT_INTERRUPT &&
+		    exit_cause != CVM_EXIT_SHARED_MEM_PAGE_FAULT) {
+			sbi_printf(
+				"[SM] !!!ERROR!!! in put_cvm_status_to_ree(), exit_cause=%u\n",
+				(unsigned int)exit_cause);
+		}
+		break;
+	}
+
+	channel->guest_context->hstatus = csr_read(CSR_HSTATUS);
+}
+
+static void switch_vector_to_tee(void)
+{
+	extern void __trap_vector_tee();
+	csr_write(mtvec, &__trap_vector_tee);
+}
+
+static void switch_vector_to_ree(void)
+{
+	extern void _trap_handler_hyp();
+	csr_write(mtvec, &_trap_handler_hyp);
+}
+
+static inline void switch_gprs(struct sbi_trap_regs *regs, uintptr_t *s_gprs,
+			       uintptr_t *d_gprs, int return_on_resume)
+{
+	int i;
+
+	for (i = 0; i < 32; i++) {
+		s_gprs[i]		   = ((unsigned long *)regs)[i];
+		((unsigned long *)regs)[i] = d_gprs[i];
+	}
+	s_gprs[0] = !return_on_resume;
+}
+
+static inline void switch_to_csrs(struct sbi_trap_regs *regs,
+				  struct tee_csr *s_csrs,
+				  struct tee_csr *d_csrs,
+				  context_switch_to_mode context_mode)
+{
+
+	s_csrs->mepc = regs->mepc;
+	regs->mepc   = d_csrs->mepc;
+
+	s_csrs->mstatus = regs->mstatus;
+	regs->mstatus	= d_csrs->mstatus;
+
+#define LOCAL_SWITCH_CSR(csrname)            \
+	s_csrs->csrname = csr_read(csrname); \
+	csr_write(csrname, d_csrs->csrname);
+
+	if (context_mode == REE_TO_CVM) {
+
+		LOCAL_SWITCH_CSR(hstatus);
+		LOCAL_SWITCH_CSR(scounteren);
+		// GUEST CSR
+		csr_write(CSR_HGATP, d_csrs->hgatp);
+		csr_write(CSR_HCOUNTEREN, d_csrs->hcounteren);
+
+		csr_write(CSR_VSSTATUS, d_csrs->vsstatus);
+		csr_write(CSR_VSIE, d_csrs->vsie);
+		csr_write(CSR_VSIP, d_csrs->vsip);
+		csr_write(CSR_VSTVEC, d_csrs->vstvec);
+		csr_write(CSR_VSSCRATCH, d_csrs->vsscratch);
+		csr_write(CSR_VSEPC, d_csrs->vsepc);
+		csr_write(CSR_VSCAUSE, d_csrs->vscause);
+		csr_write(CSR_VSTVAL, d_csrs->vstval);
+		csr_write(CSR_VSATP, d_csrs->vsatp);
+	}
+#undef LOCAL_SWITCH_CSR
+}
+
+static inline void switch_from_csrs(struct sbi_trap_regs *regs,
+				    struct tee_csr *s_csrs,
+				    struct tee_csr *d_csrs,
+				    context_switch_from_mode context_mode)
+{
+
+	s_csrs->mepc = regs->mepc;
+	regs->mepc   = d_csrs->mepc;
+
+	s_csrs->mstatus = regs->mstatus;
+	regs->mstatus	= d_csrs->mstatus;
+
+#define LOCAL_SWITCH_CSR(csrname)            \
+	s_csrs->csrname = csr_read(csrname); \
+	csr_write(csrname, d_csrs->csrname);
+
+	if (context_mode == REE_FROM_CVM) {
+		LOCAL_SWITCH_CSR(hstatus);
+		LOCAL_SWITCH_CSR(scounteren);
+
+		s_csrs->hgatp	   = csr_read_set(CSR_HGATP, 0);
+		s_csrs->hcounteren = csr_read_set(CSR_HCOUNTEREN, 0);
+		s_csrs->vsstatus   = csr_read_set(CSR_VSSTATUS, 0);
+		s_csrs->vsie	   = csr_read_set(CSR_VSIE, 0);
+		s_csrs->vsip	   = csr_read_set(CSR_VSIP, 0);
+		s_csrs->vstvec	   = csr_read_set(CSR_VSTVEC, 0);
+		s_csrs->vsscratch  = csr_read_set(CSR_VSSCRATCH, 0);
+		s_csrs->vsepc	   = csr_read_set(CSR_VSEPC, 0);
+		s_csrs->vscause	   = csr_read_set(CSR_VSCAUSE, 0);
+		s_csrs->vstval	   = csr_read_set(CSR_VSTVAL, 0);
+		s_csrs->hvip	   = csr_read_set(CSR_HVIP, 0);
+		s_csrs->vsatp	   = csr_read_set(CSR_VSATP, 0);
+	}
+#undef LOCAL_SWITCH_CSR
+}
+
+static inline void switch_trap_deleg(struct zion_state *state)
+{
+	if (state->mode == REE) {
+		csr_write(CSR_MIDELEG, ree_mideleg);
+		csr_write(CSR_HIDELEG, ree_hideleg);
+		csr_write(CSR_MEDELEG, ree_medeleg);
+		csr_write(CSR_HEDELEG, ree_hedeleg);
+	} else if (state->mode == CVM) {
+		csr_write(CSR_MIDELEG, cvm_mideleg);
+		csr_write(CSR_HIDELEG, cvm_hideleg);
+		csr_write(CSR_MEDELEG, cvm_medeleg);
+		csr_write(CSR_HEDELEG, cvm_hedeleg);
+	}
+}
+
+void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
+		       struct tee_thread *d_tthread,
+		       context_switch_to_mode context_mode,
+		       tee_quit_cause exit_cause,
+		       struct exit_mmio_reg *exit_mmio_reg,
+		       struct kvm_vcpu_channel *channel)
+{
+	uintptr_t *s_gprs = (uintptr_t *)&s_tthread->gprs;
+	uintptr_t *d_gprs = (uintptr_t *)&d_tthread->gprs;
+
+	struct tee_csr *s_csrs = &s_tthread->csrs;
+	struct tee_csr *d_csrs = &d_tthread->csrs;
+
+	zion_printf("Source csrs mstatus: %lx\n", s_csrs->mstatus);
+	zion_printf("Source csrs mepc: %lx\n", s_csrs->mepc);
+
+	zion_printf("Target csrs mstatus: %lx\n", d_csrs->mstatus);
+	zion_printf("Target csrs mepc: %lx\n", d_csrs->mepc);
+
+	hart_enter_context(d_tthread);
+
+	// Store the hypervisor registers into their thread registers &
+	// Load the CVM private vCPU registers to the context,
+	switch_gprs(regs, s_gprs, d_gprs, 1);
+
+	switch_to_csrs(regs, s_csrs, d_csrs, context_mode);
+
+	if (context_mode == REE_TO_CVM) {
+		// Get the CVM status from the REE based on the exit cause
+		get_cvm_status_from_ree(regs, exit_cause, exit_mmio_reg,
+					channel);
+
+		switch_vector_to_tee();
+		pmp_set_zion(tee_region_id, PMP_ALL_PERM);
+		__sbi_hfence_gvma_all();
+	}
+	switch_trap_deleg(&d_tthread->state);
+}
+
+void context_switch_from(struct sbi_trap_regs *regs,
+			 struct tee_thread *s_tthread,
+			 struct tee_thread *d_tthread,
+			 context_switch_from_mode context_mode,
+			 tee_quit_cause exit_cause,
+			 struct exit_mmio_reg *exit_mmio_reg,
+			 struct cvm_extra_trap_info *extra_trap,
+			 struct kvm_vcpu_channel *channel, int return_on_resume)
+{
+	uintptr_t *s_gprs = (uintptr_t *)&s_tthread->gprs;
+	uintptr_t *d_gprs = (uintptr_t *)&d_tthread->gprs;
+
+	struct tee_csr *s_csrs = &s_tthread->csrs;
+	struct tee_csr *d_csrs = &d_tthread->csrs;
+
+	hart_exit_context(s_tthread);
+
+	if (context_mode == REE_FROM_CVM) {
+		put_cvm_status_to_ree(regs, exit_cause, exit_mmio_reg,
+				      extra_trap, channel);
+
+		switch_vector_to_ree();
+		pmp_set_zion(tee_region_id, PMP_NO_PERM);
+		__sbi_hfence_gvma_all();
+	} else if (context_mode == REE_FROM_ENCLAVE) {
+
+		switch_vector_to_ree();
+		pmp_set_zion(tee_region_id, PMP_NO_PERM);
+		__sbi_hfence_gvma_all();
+	} else if (context_mode == CVM_FROM_ENCLAVE) {
+
+		__sbi_hfence_gvma_all();
+	}
+	switch_trap_deleg(&d_tthread->state);
+
+	switch_gprs(regs, s_gprs, d_gprs, return_on_resume);
+	switch_from_csrs(regs, s_csrs, d_csrs, context_mode);
+}

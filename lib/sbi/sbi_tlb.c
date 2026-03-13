@@ -23,6 +23,7 @@
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
+#include "../../zion/src/ipi.h"
 
 static unsigned long tlb_sync_off;
 static unsigned long tlb_fifo_off;
@@ -202,6 +203,9 @@ static void tlb_entry_local_process(struct sbi_tlb_info *data)
 		break;
 	case SBI_TLB_HFENCE_VVMA:
 		sbi_tlb_local_hfence_vvma(data);
+		break;
+	case SBI_PMP_IPI_LOCAL_UPDATE:
+		sbi_pmp_ipi_local_update(data);
 		break;
 	default:
 		break;

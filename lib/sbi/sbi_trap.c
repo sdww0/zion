@@ -23,6 +23,7 @@
 #include <sbi/sbi_sse.h>
 #include <sbi/sbi_timer.h>
 #include <sbi/sbi_trap.h>
+#include "../zion/src/tee-mem.h"
 
 static void sbi_trap_error_one(const struct sbi_trap_context *tcntx,
 			       const char *prefix, u32 hartid, u32 depth)
@@ -325,11 +326,13 @@ struct sbi_trap_context *sbi_trap_handler(struct sbi_trap_context *tcntx)
 		msg = "ecall handler failed";
 		break;
 	case CAUSE_LOAD_ACCESS:
+		tee_security_check(csr_read(CSR_MTVAL), mcause, 0);
 		sbi_pmu_ctr_incr_fw(SBI_PMU_FW_ACCESS_LOAD);
 		rc  = sbi_load_access_handler(tcntx);
 		msg = "load fault handler failed";
 		break;
 	case CAUSE_STORE_ACCESS:
+		tee_security_check(csr_read(CSR_MTVAL), mcause, 0);
 		sbi_pmu_ctr_incr_fw(SBI_PMU_FW_ACCESS_STORE);
 		rc  = sbi_store_access_handler(tcntx);
 		msg = "store fault handler failed";

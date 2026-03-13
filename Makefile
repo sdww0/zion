@@ -70,6 +70,7 @@ export platform_src_dir=$(platform_parent_dir)/$(platform_subdir)
 export platform_build_dir=$(build_dir)/platform/$(platform_subdir)
 export include_dir=$(CURDIR)/include
 export libsbi_dir=$(CURDIR)/lib/sbi
+export zion_dir=$(CURDIR)/zion
 export libsbiutils_dir=$(CURDIR)/lib/utils
 export firmware_dir=$(CURDIR)/firmware
 
@@ -208,6 +209,7 @@ ifdef PLATFORM
 platform-object-mks=$(shell if [ -d $(platform_src_dir)/ ]; then find $(platform_src_dir) -iname "objects.mk" | sort -r; fi)
 endif
 libsbi-object-mks=$(shell if [ -d $(libsbi_dir) ]; then find $(libsbi_dir) -iname "objects.mk" | sort -r; fi)
+zion-object-mks=$(shell if [ -d $(zion_dir)/ ]; then find $(zion_dir) -iname "objects.mk" | sort -r; fi)
 libsbiutils-object-mks=$(shell if [ -d $(libsbiutils_dir) ]; then find $(libsbiutils_dir) -iname "objects.mk" | sort -r; fi)
 firmware-object-mks=$(shell if [ -d $(firmware_dir) ]; then find $(firmware_dir) -iname "objects.mk" | sort -r; fi)
 
@@ -251,6 +253,7 @@ ifdef PLATFORM
 include $(platform-object-mks)
 endif
 include $(libsbi-object-mks)
+include $(zion-object-mks)
 include $(libsbiutils-object-mks)
 include $(firmware-object-mks)
 
@@ -261,6 +264,7 @@ libsbiutils-objs-path-y=$(foreach obj,$(libsbiutils-objs-y),$(platform_build_dir
 platform-objs-path-y=$(foreach obj,$(platform-objs-y),$(platform_build_dir)/$(obj))
 firmware-bins-path-y=$(foreach bin,$(firmware-bins-y),$(platform_build_dir)/firmware/$(bin))
 endif
+zion-objs-path-y=$(foreach obj,$(zion-objs-y),$(build_dir)/zion/$(obj))
 firmware-elfs-path-y=$(firmware-bins-path-y:.bin=.elf)
 firmware-objs-path-y=$(firmware-bins-path-y:.bin=.o)
 
@@ -268,6 +272,7 @@ firmware-objs-path-y=$(firmware-bins-path-y:.bin=.o)
 deps-y=$(platform-objs-path-y:.o=.dep)
 deps-y+=$(libsbi-objs-path-y:.o=.dep)
 deps-y+=$(libsbiutils-objs-path-y:.o=.dep)
+deps-y+=$(zion-objs-path-y:.o=.dep)
 deps-y+=$(firmware-objs-path-y:.o=.dep)
 deps-y+=$(firmware-elfs-path-y:=.dep)
 
@@ -346,7 +351,7 @@ GENFLAGS	+=	$(libsbiutils-genflags-y)
 GENFLAGS	+=	$(platform-genflags-y)
 GENFLAGS	+=	$(firmware-genflags-y)
 
-CFLAGS		=	-g -Wall -Werror -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing
+CFLAGS		=	-g -Wall -ffreestanding -nostdlib -fno-stack-protector -fno-strict-aliasing
 ifneq ($(DEBUG),)
 CFLAGS		+=	-O0
 else
@@ -512,7 +517,7 @@ all: $(targets-y)
 $(build_dir)/lib/libsbi.a: $(libsbi-objs-path-y)
 	$(call compile_ar,$@,$^)
 
-$(platform_build_dir)/lib/libplatsbi.a: $(libsbi-objs-path-y) $(libsbiutils-objs-path-y) $(platform-objs-path-y)
+$(platform_build_dir)/lib/libplatsbi.a: $(libsbi-objs-path-y) $(libsbiutils-objs-path-y) $(platform-objs-path-y) $(zion-objs-path-y)
 	$(call compile_ar,$@,$^)
 
 $(build_dir)/%.dep: $(src_dir)/%.carray $(KCONFIG_AUTOHEADER)

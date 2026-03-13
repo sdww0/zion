@@ -45,10 +45,10 @@
 static void sbi_boot_print_hardware_feature(void)
 {
 	sbi_printf("\n");
-	sbi_printf("Hardware Feature[7C1]: 0x%lx\n",csr_read(0x7c1));
-	sbi_printf("Hardware Feature[7C2]: 0x%lx\n",csr_read(0x7c2));
-	sbi_printf("Hardware Feature[7C3]: 0x%lx\n",csr_read(0x7c3));
-	sbi_printf("Hardware Feature[7C4]: 0x%lx\n",csr_read(0x7c4));
+	// sbi_printf("Hardware Feature[7C1]: 0x%lx\n",csr_read(0x7c1));
+	// sbi_printf("Hardware Feature[7C2]: 0x%lx\n",csr_read(0x7c2));
+	// sbi_printf("Hardware Feature[7C3]: 0x%lx\n",csr_read(0x7c3));
+	// sbi_printf("Hardware Feature[7C4]: 0x%lx\n",csr_read(0x7c4));
 }
 
 static void sbi_boot_print_banner(struct sbi_scratch *scratch)
