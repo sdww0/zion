@@ -113,17 +113,35 @@ void set_inited(unsigned int tid)
 
 unsigned long reserve_mem(unsigned long base, unsigned long count)
 {
+	unsigned long size = count << PAGE_SHIFT;
 	int ret = tee_mem_init((uint8_t *)base, (uint32_t)count);
-	if (ret)
+	if (ret) {
+		sbi_printf("[SBI] reserve_mem(): tee_mem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
+			   base, count, ret);
 		return ret;
+	}
 
-	tee_region_id = teem_init(base, count << PAGE_SHIFT);
-	if (tee_region_id < 0)
+	tee_region_id = teem_init(base, size);
+	if (tee_region_id < 0) {
+		sbi_printf("[SBI] reserve_mem(): teem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
+			   base, count, tee_region_id);
 		return tee_region_id;
+	}
+	/*
+	 * The protected TVM region must be blocked on every started hart.
+	 * A local-only PMP update works on single-hart QEMU, but leaves
+	 * other REE harts unprotected on SMP boards.
+	 */
+	ret = pmp_set_global(tee_region_id, PMP_NO_PERM);
+	if (ret) {
+		sbi_printf("[SBI] reserve_mem(): pmp_set_global(region=%d, perm=0x%x) failed, ret=%d\n",
+			   tee_region_id, PMP_NO_PERM, ret);
+		return ret;
+	}
 
-	sbi_printf("[SBI] The tthread physical start: 0x%lx\n",
-		   (uintptr_t)(&(tee_threads[0])));
-	pmp_set_zion(tee_region_id, PMP_NO_PERM);
+	sbi_printf("[SBI] reserve_mem(): protected region=%d, addr=0x%lx, size=0x%lx\n",
+		   tee_region_id, (unsigned long)pmp_region_get_addr(tee_region_id),
+		   (unsigned long)pmp_region_get_size(tee_region_id));
 	return 0;
 }
 
@@ -206,8 +224,11 @@ int teem_init(uintptr_t start, unsigned long size)
 {
 	int region = -1;
 	int ret = pmp_region_init_atomic(start, size, PMP_PRI_ANY, &region, 0);
-	if (ret)
+	if (ret) {
+		sbi_printf("[SBI] teem_init(): pmp_region_init_atomic() failed, ret=%d\n",
+			   ret);
 		return -1;
+	}
 
 	return region;
 }

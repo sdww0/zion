@@ -152,9 +152,8 @@ unsigned long init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 
 	init_guest_csrs(&vcpu->tthread->csrs, mstatus, cvms[rtid].hgatp);
 
-	sbi_printf(
-		"[SBI] init_cvm_vcpu(): tid=%u, rtid=%u, ttid=%u, tthread=%p\n",
-		tid, rtid, ttid, tthread);
+	sbi_printf("[SM] CVM vcpu: tid=%u, rtid=%u, ttid=%u\n",
+		   tid, rtid, ttid);
 	return 0;
 }
 
@@ -235,11 +234,7 @@ void set_cvm_mem_info(unsigned int tid, struct cvm_mem_info *mem_info)
 
 	*dest = *mem_info;
 
-	sbi_printf("[SM] Set CVM memory info for tid=%u\n", tid);
-	sbi_printf("[SM]   slot: %u\n", dest->slot);
-	sbi_printf("[SM]   flags: %u\n", dest->flags);
-	sbi_printf("[SM]   guest_phys_addr: %lx\n", dest->guest_phys_addr);
-	sbi_printf("[SM]   memory_size: %lx\n", dest->memory_size);
-	sbi_printf("[SM]   userspace_addr: %lx\n", dest->userspace_addr);
-	sbi_printf("[SM]   private: %u\n", dest->private);
+	sbi_printf("[SM] CVM mem: tid=%u, slot=%u, gpa=0x%lx, size=0x%lx, private=%u\n",
+		   tid, dest->slot, dest->guest_phys_addr, dest->memory_size,
+		   dest->private);
 }

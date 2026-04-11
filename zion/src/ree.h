@@ -89,7 +89,6 @@ void hart_exit_context(struct tee_thread *s_tthread);
 void save_tthread_state(struct zion_state *state, unsigned int rtid,
 			unsigned int ttid, struct tee_thread *tthread,
 			zion_mode mode);
-int osm_init(void);
 void ree_metadata_init(void);
 
 #endif

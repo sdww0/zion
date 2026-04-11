@@ -97,8 +97,18 @@ static bool sanitize_guest_saved_reg(const char *reg_name,
 	if (*reg_value == 0)
 		return false;
 
+#ifdef DEBUG
+	/*
+	 * The host-visible shared channel should not drive guest callee-saved
+	 * registers after initial entry. Keep this as a debug probe; normal
+	 * builds avoid printing it because stale shared values are not the PMP
+	 * access-control signal we care about.
+	 */
 	sbi_printf("[SM] TEE security check: %s register mismatch, value: %lx\n",
 		   reg_name, *reg_value);
+#else
+	(void)reg_name;
+#endif
 	if (*reg_value == guest_saved_reg_reset_sentinel)
 		*reg_value = 0;
 

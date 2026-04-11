@@ -30,8 +30,8 @@ enum sbi_tlb_type {
 	SBI_TLB_HFENCE_GVMA,
 	SBI_TLB_HFENCE_VVMA_ASID,
 	SBI_TLB_HFENCE_VVMA,
-	SBI_TLB_TYPE_MAX,
 	SBI_PMP_IPI_LOCAL_UPDATE,
+	SBI_TLB_TYPE_MAX,
 };
 
 struct sbi_tlb_info {

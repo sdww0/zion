@@ -393,6 +393,7 @@ static const u32 tlb_type_to_pmu_fw_event[SBI_TLB_TYPE_MAX] = {
 	[SBI_TLB_HFENCE_GVMA] = SBI_PMU_FW_HFENCE_GVMA_SENT,
 	[SBI_TLB_HFENCE_VVMA_ASID] = SBI_PMU_FW_HFENCE_VVMA_ASID_SENT,
 	[SBI_TLB_HFENCE_VVMA] = SBI_PMU_FW_HFENCE_VVMA_SENT,
+	[SBI_PMP_IPI_LOCAL_UPDATE] = SBI_PMU_FW_IPI_SENT,
 };
 
 int sbi_tlb_request(ulong hmask, ulong hbase, struct sbi_tlb_info *tinfo)

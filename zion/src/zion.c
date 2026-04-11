@@ -3,7 +3,6 @@
 #include <sbi/sbi_ecall.h>
 #include <sbi/riscv_barrier.h>
 #include <sbi/riscv_asm.h>
-#include "pmp.h"
 #include "ree.h"
 #include "sm.h"
 #include "tee.h"
@@ -11,7 +10,6 @@
 extern struct sbi_ecall_extension ecall_cvm;
 
 static int zion_init_done = 0;
-static int sm_region_id = 0, os_region_id = 0;
 
 void zion_enable_counters(void)
 {
@@ -29,23 +27,12 @@ void zion_init(bool cold_boot)
 
 		sbi_ecall_register_extension(&ecall_cvm);
 
-		sm_region_id = smm_init();
-		os_region_id = osm_init();
-
-		if (os_region_id < 0) {
-			sbi_printf("[SM] !!! osm_init() failed");
-			sbi_hart_hang();
-		}
-
-		if (sm_region_id < 0 || os_region_id < 0) {
-			sbi_printf("[SM] !!! smm_init() or osm_init() failed");
-			sbi_hart_hang();
-		}
-		sbi_printf("[SM] smm_init() succeeded: region_id=%d\n",
-			   sm_region_id);
-		sbi_printf("[SM] osm_init() succeeded: region_id=%d\n",
-			   os_region_id);
-
+		/*
+		 * Legacy SMM/OSM regions used Zion's own static PMP allocator.
+		 * The current flow leaves boot-time PMP ownership to OpenSBI and
+		 * installs the TVM private-memory window only after the host
+		 * reserves it through SBI_SM_RESERVE_MEM.
+		 */
 		sm_metadata_init();
 		ree_metadata_init();
 		tee_metadata_init();
@@ -60,12 +47,9 @@ void zion_init(bool cold_boot)
 		mb();
 	}
 
-	/* below are executed by all harts */
-	pmp_init();
-	pmp_set_zion(os_region_id, PMP_ALL_PERM);
-	pmp_set_zion(sm_region_id, PMP_NO_PERM);
-
+	/* Per-hart counters are enabled after cold-boot metadata is ready. */
 	zion_enable_counters();
 
-	sbi_printf("[SBI] Zion security monitor has been initialized!\n");
+	if (cold_boot)
+		sbi_printf("[SBI] Zion security monitor initialized\n");
 }

@@ -4,7 +4,6 @@
 #include "zion.h"
 #include "cvm.h"
 #include "context.h"
-#include "pmp.h"
 
 struct ree ree;
 
@@ -67,17 +66,6 @@ void save_tthread_state(struct zion_state *state, unsigned int rtid,
 	state->ttid    = ttid;
 	state->tthread = tthread;
 	state->mode    = mode;
-}
-
-int osm_init()
-{
-	sbi_printf("[SM] osm_init()\n");
-	int region = -1;
-	int ret	  = pmp_region_init_atomic(0, -1UL, PMP_PRI_BOTTOM, &region, 1);
-	if (ret)
-		return -1;
-
-	return region;
 }
 
 void ree_metadata_init()

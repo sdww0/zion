@@ -4,7 +4,6 @@
 #define SMM_BASE 0x80000000
 #define SMM_SIZE 0x150000
 
-int smm_init(void);
 void sm_metadata_init(void);
 
 #endif

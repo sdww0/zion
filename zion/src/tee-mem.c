@@ -23,12 +23,16 @@ static inline int get_allocated_data_block_count(data_pool_t *dp)
 
 static inline void tee_mem_status(data_pool_t *dp)
 {
+#ifdef DEBUG
 	// Gather data-pool statistics for logging.
 	int free_blocks	     = get_free_data_block_count(dp);
 	int allocated_blocks = get_allocated_data_block_count(dp);
 
-	sbi_printf("[SM] Data Pool -- Free blocks: %d, Allocated blocks: %d\n",
-		   free_blocks, allocated_blocks);
+	zion_printf("[SM] Data Pool -- Free blocks: %d, Allocated blocks: %d\n",
+		    free_blocks, allocated_blocks);
+#else
+	(void)dp;
+#endif
 }
 
 // Initialize the page-table pool. The provided base must point to a
@@ -408,8 +412,6 @@ static void report_protected_region_access(uint64_t hpa, unsigned long mcause)
 static void init_mem_pool(mem_pool_t *mp, uint8_t *base, uint32_t n_page,
 			  data_block_t blocks_arr[], int max_blocks)
 {
-	sbi_printf("[SBI] init_mem_pool(): base=%lx, n_page=%d\n",
-		   (uintptr_t)base, n_page);
 	mp->base_addr		 = base;
 	mp->total_pages		 = n_page;
 	uint32_t total_mem_bytes = n_page * PAGE_SIZE;
@@ -468,9 +470,6 @@ void tee_security_check(unsigned long mtval, unsigned long mcause,
 
 int tee_mem_init(uint8_t *mem_base, uint32_t n_page)
 {
-
-	sbi_printf("[SBI] tee_mem_init(): base=%lx, n_page=%d\n",
-		   (uintptr_t)mem_base, n_page);
 
 	sbi_memset((void *)mem_base, 0, n_page * PAGE_SIZE);
 

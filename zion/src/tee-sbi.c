@@ -14,9 +14,11 @@ unsigned long sbi_sm_reserve_mem(struct sbi_trap_regs *regs, unsigned long type,
 	(void)regs;
 	(void)type;
 
-	sbi_printf("[SBI] sbi_sm_reserve_mem(), base=0x%lx, count=0x%lx\n",
-		   base, count);
-	return reserve_mem(base, count);
+	type = reserve_mem(base, count);
+	if (type)
+		sbi_printf("[SBI] sbi_sm_reserve_mem() failed: ret=0x%lx, base=0x%lx, count=0x%lx\n",
+			   type, base, count);
+	return type;
 }
 
 unsigned long sbi_sm_create_cvm(struct sbi_trap_regs *regs,
@@ -28,8 +30,9 @@ unsigned long sbi_sm_create_cvm(struct sbi_trap_regs *regs,
 	ret	   = create_cvm(regs, &tid);
 	if (!ret)
 		out->value = tid;
-	sbi_printf("[SBI] sbi_sm_create_cvm(): tid=0x%x, ret=0x%lx\n", tid,
-		   ret);
+	else
+		sbi_printf("[SBI] sbi_sm_create_cvm() failed: ret=0x%lx\n",
+			   ret);
 	return ret;
 }
 
@@ -43,8 +46,9 @@ unsigned long sbi_sm_init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 	ret	   = init_cvm_vcpu(regs, tid, &ttid, shared_mem_ptr);
 	if (!ret)
 		out->value = ttid;
-	sbi_printf("[SBI] sbi_sm_init_cvm_vcpu(): tid=%x, ttid=%x, ret=%lx\n",
-		   tid, ttid, ret);
+	else
+		sbi_printf("[SBI] sbi_sm_init_cvm_vcpu() failed: tid=%x, ret=%lx\n",
+			   tid, ret);
 	return ret;
 }
 

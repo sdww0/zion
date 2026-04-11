@@ -4,6 +4,7 @@
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_error.h>
+#include <sbi/sbi_hfence.h>
 #include <sbi/sbi_hart.h>
 #include <sbi/sbi_illegal_insn.h>
 #include <sbi/sbi_ipi.h>
@@ -272,6 +273,12 @@ static int handle_guest_page_fault(struct sbi_trap_regs *regs,
 			return -1;
 		}
 
+		/*
+		 * The CVM G-stage mapping was updated in M-mode, so flush any
+		 * stale guest-physical translation before we resume the guest.
+		 */
+		__sbi_hfence_gvma_all();
+
 		return 0;
 	}
 
@@ -358,10 +365,6 @@ struct sbi_trap_context *cvm_trap_handler(struct sbi_trap_context *tcntx)
 	}
 
 	struct cvm_extra_trap_info extra_trap;
-
-	zion_printf(
-		"[SBI] cvm_trap_handler: mepc=0x%lx, mcause=0x%lx, mtval=0x%lx, mtval2=0x%lx, mtinst=0x%lx\n",
-		regs->mepc, mcause, trap->tval, trap->tval2, trap->tinst);
 
 	switch (mcause) {
 	case CAUSE_ILLEGAL_INSTRUCTION:
