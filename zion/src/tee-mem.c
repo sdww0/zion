@@ -4,6 +4,7 @@
 #include "tee.h"
 #include "sm.h"
 #include "sbi/riscv_encoding.h"
+#include "sbi/sbi_hfence.h"
 
 mem_pool_t g_mem_pool;
 static data_block_t data_blocks_arr[MAX_DATA_BLOCKS];
@@ -62,6 +63,40 @@ static void *alloc_pt_page(mem_pool_t *mp, uint32_t cvm_id)
 	void *page = subpool->base + (subpool->offset * PAGE_SIZE);
 	subpool->offset++;
 	return page;
+}
+
+static int split_leaf_entry(mem_pool_t *mp, uint32_t cvm_id, pte_t *entry,
+			    int level)
+{
+	pte_t old_entry = *entry;
+	pte_t *new_pt;
+	uint64_t old_hpa;
+	uint64_t flags;
+	uint64_t child_size;
+
+	if (!mp || !entry || level <= 0)
+		return -1;
+
+	new_pt = alloc_pt_page(mp, cvm_id);
+	if (!new_pt)
+		return -1;
+
+	old_hpa = ((old_entry & ZION_PTE_ADDR_MASK) >> ZION_PTE_PPN_SHIFT)
+		  << PAGE_SHIFT;
+	flags = old_entry & ZION_PTE_FLAG_MASK;
+	child_size = PAGE_SIZE << ((level - 1) * gstage_index_bits);
+
+	sbi_memset(new_pt, 0, PAGE_SIZE);
+	for (int i = 0; i <= ZION_PTE_INDEX_MASK; i++) {
+		uint64_t child_hpa = old_hpa + i * child_size;
+
+		new_pt[i] = ((child_hpa >> PAGE_SHIFT)
+			     << ZION_PTE_PPN_SHIFT) | flags;
+	}
+
+	*entry = (((uint64_t)new_pt >> PAGE_SHIFT) << ZION_PTE_PPN_SHIFT) |
+		 PTE_V;
+	return 0;
 }
 
 // Return the root page-table address for the selected CVM.
@@ -235,10 +270,13 @@ pte_t *get_pte_entry(mem_pool_t *mp, pte_t *root_pt, uint64_t va, bool allocate,
 
 		// A PTE with R/W/X bits set is already a leaf entry.
 		if ((*entry) & (PTE_X | PTE_R | PTE_W)) {
-			sbi_printf(
-				"[SBI] !!!ERROR!!! get_pte_entry(): encountered leaf entry at level %d\n",
-				level);
-			return NULL;
+			if (!allocate ||
+			    split_leaf_entry(mp, cvm_id, entry, level)) {
+				sbi_printf(
+					"[SBI] !!!ERROR!!! get_pte_entry(): encountered leaf entry at level %d\n",
+					level);
+				return NULL;
+			}
 		}
 
 		// Bits 10..53 hold the PPN.
@@ -294,6 +332,7 @@ int map_gpa_to_hpa(mem_pool_t *mp, int cvm_id, uint64_t gpa, uint64_t hpa,
 			*pte = ((cur_hpa >> PAGE_SHIFT)
 				<< ZION_PTE_PPN_SHIFT) | PTE_V | PTE_R |
 			       PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+		__sbi_hfence_gvma_all();
 	}
 	return 0;
 }

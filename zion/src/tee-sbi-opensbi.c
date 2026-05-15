@@ -46,7 +46,6 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 		retval = sbi_sm_destroy_cvm(regs, (unsigned int)regs->a0);
 		break;
 	case SBI_SM_REGISTER_PT:
-		sbi_printf("[SBI] SBI_SM_REGISTER_PT called\n");
 		retval = sbi_sm_register_pt(regs, (unsigned int)regs->a0,
 					    regs->a1);
 		break;

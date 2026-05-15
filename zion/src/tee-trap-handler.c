@@ -172,7 +172,9 @@ static int handle_access_or_vs_ecall(struct sbi_trap_context *tcntx,
 					    : SBI_PMU_FW_ACCESS_STORE);
 	}
 
-	if (is_zion_sbi(regs->a7))
+	if (is_zion_sbi(regs->a7) &&
+	    regs->a6 != SBI_SM_REGISTER_SHARED_MEM_WITH_REE &&
+	    regs->a6 != SBI_SM_FREE_SHARED_MEM_WITH_REE)
 		return sbi_ecall_handler(tcntx);
 
 	if (regs->a7 == SBI_EXT_DBCN &&
