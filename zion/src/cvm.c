@@ -3,6 +3,8 @@
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_hart.h>
+#include <sbi/sbi_hfence.h>
+#include <sbi/sbi_string.h>
 #include "cvm.h"
 #include "context.h"
 #include "mprv.h"
@@ -10,8 +12,97 @@
 
 struct cvm cvms[MAX_CVMS];
 static unsigned long cvms_alloc_bitmap = 0;
+static unsigned long ree_tee_alloc_bitmap = 0;
 static const unsigned long cvm_guest_hstatus_flags =
 	HSTATUS_VTW | HSTATUS_SPVP | HSTATUS_SPV;
+
+static void reset_cvm_metadata(unsigned int rtid)
+{
+	if (rtid >= MAX_CVMS)
+		return;
+
+	sbi_memset(&cvms[rtid], 0, sizeof(cvms[rtid]));
+	cvms[rtid].owner_rtid = (unsigned int)-1;
+
+	for (size_t i = 0; i < MAX_CVM_VCPUS; i++)
+		cvms[rtid].vcpus[i].exit_cause = TEE_INIT;
+}
+
+static bool cvm_rtid_allocated(unsigned int rtid)
+{
+	return rtid < CVM_NUM && (cvms_alloc_bitmap & (1UL << rtid));
+}
+
+static int alloc_cvm_rtid(unsigned int *rtid)
+{
+	for (unsigned int i = 0; i < CVM_NUM; i++) {
+		if (cvms_alloc_bitmap & (1UL << i))
+			continue;
+
+		cvms_alloc_bitmap |= 1UL << i;
+		*rtid = i;
+		return 0;
+	}
+
+	return -1;
+}
+
+static void free_cvm_rtid(unsigned int rtid)
+{
+	if (rtid < CVM_NUM)
+		cvms_alloc_bitmap &= ~(1UL << rtid);
+}
+
+static bool ree_tee_allocated(unsigned int tid)
+{
+	return tid < MAX_TEES && (ree_tee_alloc_bitmap & (1UL << tid));
+}
+
+static int alloc_ree_tee_id(unsigned int *tid)
+{
+	for (unsigned int i = 0; i < MAX_TEES; i++) {
+		if (ree_tee_alloc_bitmap & (1UL << i))
+			continue;
+
+		ree_tee_alloc_bitmap |= 1UL << i;
+		*tid = i;
+		return 0;
+	}
+
+	return -1;
+}
+
+static void free_ree_tee_id(unsigned int tid)
+{
+	if (tid >= MAX_TEES)
+		return;
+
+	sbi_memset(&ree.tees[tid], 0, sizeof(ree.tees[tid]));
+	ree_tee_alloc_bitmap &= ~(1UL << tid);
+}
+
+static int cvm_tid_to_rtid(unsigned int tid, unsigned int *rtid)
+{
+	if (!ree_tee_allocated(tid) || ree.tees[tid].mode != CVM)
+		return -1;
+
+	*rtid = ree.tees[tid].id;
+	if (!cvm_rtid_allocated(*rtid))
+		return -1;
+
+	return 0;
+}
+
+static void free_cvm_vcpu_threads(unsigned int rtid)
+{
+	if (rtid >= MAX_CVMS)
+		return;
+
+	for (size_t i = 0; i < MAX_CVM_VCPUS; i++) {
+		tee_thread_free(cvms[rtid].vcpus[i].tthread);
+		cvms[rtid].vcpus[i].tthread = NULL;
+	}
+}
 
 static void init_guest_csrs(struct tee_csr *guest_csrs, uintptr_t mstatus,
 			    unsigned long hgatp)
@@ -49,26 +140,27 @@ static void dump_trap_regs(const char *label, const struct sbi_trap_regs *regs)
 
 unsigned long create_cvm(struct sbi_trap_regs *regs, unsigned int *_tid)
 {
-	unsigned int rtid = CVM_NUM;
+	unsigned int rtid;
 	unsigned int tid;
 	struct tee *tee;
 
 	(void)regs;
 
-	// Allocate a CVM ID from cvms_alloc_bitmap
-	for (int i = 0; i < CVM_NUM; i++) {
-		if (!(cvms_alloc_bitmap & (1UL << i))) {
-			cvms_alloc_bitmap |= (1UL << i);
-			rtid = i;
-			break;
-		}
-	}
-	if (rtid == CVM_NUM || ree.tee_id_next >= MAX_TEES)
+	if (alloc_ree_tee_id(&tid) != 0)
 		return -1;
+
+	if (alloc_cvm_rtid(&rtid) != 0) {
+		free_ree_tee_id(tid);
+		return -1;
+	}
+
+	reset_cvm_metadata(rtid);
+	reset_cvm_pt_pool(&g_mem_pool, rtid);
 
 	unsigned long pgd = (unsigned long)get_cvm_root_pt(&g_mem_pool, rtid);
 	if (!pgd) {
-		cvms_alloc_bitmap &= ~(1UL << rtid);
+		free_cvm_rtid(rtid);
+		free_ree_tee_id(tid);
 		return -1;
 	}
 
@@ -82,12 +174,11 @@ unsigned long create_cvm(struct sbi_trap_regs *regs, unsigned int *_tid)
 	cvms[rtid].hgatp = hgatp;
 	cvms[rtid].pgd	 = pgd;
 
-	tid		      = ree.tee_id_next++;
 	tee		      = &ree.tees[tid];
 
 	tee->id		      = rtid;
 	tee->mode	      = CVM;
-	cvms[rtid].owner_rtid = -1;
+	cvms[rtid].owner_rtid = (unsigned int)-1;
 
 	*_tid = tid;
 
@@ -104,17 +195,21 @@ unsigned long init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 	unsigned int rtid, ttid;
 
 	(void)regs;
-	rtid = ree.tees[tid].id;
+	if (cvm_tid_to_rtid(tid, &rtid) != 0)
+		return -1;
 
 	ttid   = cvms[rtid].ttid_next;
-	if (ttid >= MAX_CVM_VCPUS || tee_thread_next >= MAX_TEE_THREADS)
+	if (ttid >= MAX_CVM_VCPUS)
+		return -1;
+
+	struct tee_thread *tthread = tee_thread_alloc();
+	if (!tthread)
 		return -1;
 
 	*_ttid = ttid;
 	cvms[rtid].ttid_next++;
 
 	struct cvm_vcpu *vcpu	   = &cvms[rtid].vcpus[ttid];
-	struct tee_thread *tthread = &tee_threads[tee_thread_next++];
 	tthread->master		   = (void *)vcpu;
 
 	save_tthread_state(&tthread->state, rtid, ttid, tthread, CVM);
@@ -124,6 +219,9 @@ unsigned long init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 	int illegal = copy_to_sm((void *)&vcpu->channel, (uintptr_t)_shared_mem,
 				 sizeof(struct kvm_vcpu_channel));
 	if (illegal) {
+		cvms[rtid].ttid_next--;
+		vcpu->tthread = NULL;
+		tee_thread_free(tthread);
 		sbi_printf(
 			"[SBI] !!!ERROR!!! in tvm_vcpu_init(): copy_to_sm()\n");
 		sbi_hart_hang();
@@ -161,7 +259,8 @@ unsigned long enter_cvm(struct sbi_trap_regs *regs, unsigned int tid,
 			unsigned int ttid)
 {
 	unsigned int rtid;
-	rtid		      = ree.tees[tid].id;
+	if (cvm_tid_to_rtid(tid, &rtid) != 0)
+		return -1;
 	struct cvm_vcpu *vcpu = &cvms[rtid].vcpus[ttid];
 
 	context_switch_to(regs, ree.harts[current_hartid()].tthread,
@@ -200,7 +299,8 @@ unsigned long exit_cvm(struct sbi_trap_regs *regs, unsigned int tid,
 	unsigned int rtid;
 
 	(void)trap;
-	rtid		      = ree.tees[tid].id;
+	if (cvm_tid_to_rtid(tid, &rtid) != 0)
+		return -1;
 	struct cvm_vcpu *vcpu = &cvms[rtid].vcpus[ttid];
 	vcpu->exit_cause      = exit_cause;
 
@@ -218,18 +318,31 @@ unsigned long exit_cvm(struct sbi_trap_regs *regs, unsigned int tid,
 
 unsigned long destroy_cvm(unsigned int tid)
 {
-	unsigned int rtid = hart_get_callee_rtid(tid);
+	unsigned int rtid;
 
-	zion_printf("[SM] Destroy CVM: %d\n", tid);
-	cvms_alloc_bitmap &= ~(1UL << rtid);
+	if (cvm_tid_to_rtid(tid, &rtid) != 0)
+		return -1;
 
+	zion_printf("[SM] Destroy CVM: tid=%u, rtid=%u\n", tid, rtid);
+
+	free_cvm_vcpu_threads(rtid);
 	free_data_blocks_per_tid(&g_mem_pool.data_pool, rtid);
+	reset_cvm_pt_pool(&g_mem_pool, rtid);
+	reset_cvm_metadata(rtid);
+	__sbi_hfence_gvma_all();
+
+	free_cvm_rtid(rtid);
+	free_ree_tee_id(tid);
 	return 0;
 }
 
 void set_cvm_mem_info(unsigned int tid, struct cvm_mem_info *mem_info)
 {
-	unsigned int rtid = hart_get_callee_rtid(tid);
+	unsigned int rtid;
+
+	if (cvm_tid_to_rtid(tid, &rtid) != 0)
+		return;
+
 	struct cvm_mem_info *dest = &cvms[rtid].mem_info;
 
 	*dest = *mem_info;

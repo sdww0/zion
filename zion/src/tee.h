@@ -154,6 +154,8 @@ extern unsigned int tee_thread_next;
 struct cvm_extra_trap_info;
 struct kvm_vcpu_channel;
 
+struct tee_thread *tee_thread_alloc(void);
+void tee_thread_free(struct tee_thread *tthread);
 unsigned long reserve_mem(unsigned long base, unsigned long count);
 unsigned long register_pt(unsigned int tid, struct sbi_register_pt *pt);
 unsigned long sync_pt(unsigned int tid, unsigned long gpa,

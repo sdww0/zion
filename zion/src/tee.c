@@ -2,6 +2,7 @@
 #include <sbi/riscv_asm.h>
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_console.h>
+#include <sbi/sbi_string.h>
 #include "zion.h"
 #include "tee.h"
 #include "ree.h"
@@ -14,8 +15,41 @@
 
 struct tee_thread tee_threads[MAX_TEE_THREADS];
 unsigned int tee_thread_next = 0;
+static unsigned long tee_thread_alloc_bitmap;
 
 int tee_region_id = 0;
+
+struct tee_thread *tee_thread_alloc(void)
+{
+	for (size_t i = MAX_REE_HARTS; i < MAX_TEE_THREADS; i++) {
+		if (tee_thread_alloc_bitmap & (1UL << i))
+			continue;
+
+		tee_thread_alloc_bitmap |= 1UL << i;
+		sbi_memset(&tee_threads[i], 0, sizeof(tee_threads[i]));
+		return &tee_threads[i];
+	}
+
+	return NULL;
+}
+
+void tee_thread_free(struct tee_thread *tthread)
+{
+	if (!tthread)
+		return;
+
+	if (tthread < tee_threads ||
+	    tthread >= &tee_threads[MAX_TEE_THREADS])
+		return;
+
+	size_t index = tthread - tee_threads;
+
+	if (index < MAX_REE_HARTS)
+		return;
+
+	sbi_memset(tthread, 0, sizeof(*tthread));
+	tee_thread_alloc_bitmap &= ~(1UL << index);
+}
 
 static size_t get_load_mem_chunk_size(const struct sbi_load_mem *req,
 				      size_t cursor)

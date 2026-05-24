@@ -103,6 +103,7 @@ void free_data_blocks_per_tid(data_pool_t *dp, uint32_t tid);
 void *get_cvm_root_pt(mem_pool_t *mp, uint32_t cvm_id);
 uint8_t get_cvm_pt_mode(mem_pool_t *mp, uint32_t cvm_id);
 void set_cvm_pt_mode(mem_pool_t *mp, uint32_t cvm_id, uint8_t mode);
+void reset_cvm_pt_pool(mem_pool_t *mp, uint32_t cvm_id);
 pte_t *get_pte_entry(mem_pool_t *mp, pte_t *root_pt, uint64_t va, bool allocate,
 		     int cvm_id, int target_level, uint8_t page_table_mode);
 int map_gpa_to_hpa(mem_pool_t *mp, int cvm_id, uint64_t gpa, uint64_t hpa,

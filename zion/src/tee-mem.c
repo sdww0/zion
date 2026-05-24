@@ -121,6 +121,20 @@ void set_cvm_pt_mode(mem_pool_t *mp, uint32_t cvm_id, uint8_t mode)
 	mp->pt_pool.cvm[cvm_id].pt_mode = mode;
 }
 
+void reset_cvm_pt_pool(mem_pool_t *mp, uint32_t cvm_id)
+{
+	if (!mp || cvm_id >= CVM_NUM)
+		return;
+
+	pt_subpool_t *subpool = &mp->pt_pool.cvm[cvm_id];
+	if (!subpool->base)
+		return;
+
+	sbi_memset(subpool->base, 0, subpool->size);
+	subpool->pt_mode = CVM_GSTAGE_MODE;
+	subpool->offset = ROOT_PT_PAGES;
+}
+
 // Split the data pool into 2MB blocks and build the free list.
 static void init_data_pool(data_pool_t *dp, uint64_t start_addr,
 			   size_t pool_size, data_block_t blocks_arr[],
