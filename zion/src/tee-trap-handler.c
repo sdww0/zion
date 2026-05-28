@@ -17,6 +17,7 @@
 #include <sbi/sbi_bitops.h>
 #include "zion.h"
 #include "cvm.h"
+#include "enclave.h"
 #include "tee-mem.h"
 
 #define CVM_SHARED_MEM_FAULT_ADDR_BASE 0x4000000000ULL
@@ -413,4 +414,199 @@ trap_done:
 
 	sbi_trap_set_context(scratch, tcntx->prev_context);
 	return tcntx;
+}
+
+/*
+ * enclave_trap_handler - Handle traps from Eyrie runtime (VS-mode enclave).
+ *
+ * Similar to cvm_trap_handler but dispatches enclave exit instead of
+ * CVM exit. Eyrie's VS-mode ecall (CAUSE_VIRTUAL_SUPERVISOR_ECALL)
+ * is the primary exit mechanism.
+ */
+struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
+{
+	int rc			    = SBI_ENOTSUPP;
+	const char *msg		    = "enclave trap handler failed";
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct sbi_trap_info *trap  = &tcntx->trap;
+	struct sbi_trap_regs *regs  = &tcntx->regs;
+	ulong mcause		    = tcntx->trap.cause;
+	ulong interrupt_mask	    = 1UL << (__riscv_xlen - 1);
+
+	/* Update trap context pointer */
+	tcntx->prev_context = sbi_trap_get_context(scratch);
+	sbi_trap_set_context(scratch, tcntx);
+
+	if (!(regs->mstatus & MSTATUS_MPV)) {
+		sbi_printf(
+			"[SM] !!!ERROR!!! in enclave_trap_handler!!! mepc=%lx, mcause=%lx, mstatus=%lx\n",
+			regs->mepc, mcause, regs->mstatus);
+		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
+			       trap->tinst, regs);
+		sbi_hart_hang();
+	}
+
+	unsigned int eid = hart_get_caller_rtid();
+
+	/* Interrupt handling */
+	if (mcause & interrupt_mask) {
+		ulong interrupt_cause = mcause & ~interrupt_mask;
+
+		switch (interrupt_cause) {
+		case IRQ_M_TIMER:
+			sbi_timer_process();
+			rc = 0;
+			goto trap_done;
+		case IRQ_S_TIMER:
+			deliver_trap_to_ree(regs->mepc,
+					    IRQ_S_TIMER | interrupt_mask, trap);
+			rc = sbi_sm_exit_enclave(regs, eid,
+						 ENCLAVE_STOP_TIMER_INTERRUPT);
+			goto trap_done;
+		case IRQ_M_SOFT:
+			sbi_ipi_process();
+			rc = 0;
+			goto trap_done;
+		case IRQ_S_SOFT:
+		case IRQ_S_EXT:
+			deliver_trap_to_ree(regs->mepc,
+					    interrupt_cause | interrupt_mask,
+					    trap);
+			rc = sbi_sm_exit_enclave(regs, eid,
+						 ENCLAVE_STOP_TIMER_INTERRUPT);
+			goto trap_done;
+		default:
+			msg = "unhandled enclave interrupt";
+			rc = SBI_ENOTSUPP;
+			goto trap_done;
+		}
+	}
+
+	/* Exception handling */
+	switch (mcause) {
+	case CAUSE_ILLEGAL_INSTRUCTION:
+		rc  = sbi_illegal_insn_handler(tcntx);
+		msg = "illegal instruction handler failed";
+		break;
+	case CAUSE_MISALIGNED_LOAD:
+		rc  = sbi_misaligned_load_handler(tcntx);
+		msg = "misaligned load handler failed";
+		break;
+	case CAUSE_MISALIGNED_STORE:
+		rc  = sbi_misaligned_store_handler(tcntx);
+		msg = "misaligned store handler failed";
+		break;
+	case CAUSE_LOAD_ACCESS:
+	case CAUSE_STORE_ACCESS:
+		sbi_pmu_ctr_incr_fw(mcause == CAUSE_LOAD_ACCESS
+					    ? SBI_PMU_FW_ACCESS_LOAD
+					    : SBI_PMU_FW_ACCESS_STORE);
+		/* Fall through to VS-mode ecall handling */
+		/* fallthrough */
+	case CAUSE_VIRTUAL_SUPERVISOR_ECALL:
+		/*
+		 * Eyrie's SBI ecall. If it's a Zion SBI call, handle it
+		 * in M-mode. Otherwise, exit enclave and let host handle it.
+		 */
+		if (is_zion_sbi(regs->a7)) {
+			rc = sbi_ecall_handler(tcntx);
+		} else if (regs->a7 == SBI_EXT_DBCN &&
+			   regs->a6 == SBI_EXT_DBCN_CONSOLE_WRITE_BYTE) {
+			sbi_printf("%c", (char)regs->a0);
+			rc = 0;
+		} else {
+			/* Unknown ecall: exit enclave to host */
+			deliver_trap_to_ree(regs->mepc, mcause, trap);
+			rc = sbi_sm_exit_enclave(regs, eid,
+						 ENCLAVE_STOP_SYSCALL_HOST);
+		}
+		break;
+	case CAUSE_FETCH_GUEST_PAGE_FAULT:
+	case CAUSE_LOAD_GUEST_PAGE_FAULT:
+	case CAUSE_STORE_GUEST_PAGE_FAULT:
+		/*
+		 * G-stage page fault in enclave. If the fault address is in
+		 * the EPM region, allocate a data block and map it (demand
+		 * paging). Otherwise, exit to host.
+		 */
+		{
+			unsigned long fault_addr =
+				(trap->tval2 << 2) | (trap->tval & 0x3);
+			struct enclave *enc = &enclaves[eid];
+
+			if (enc->mem_info.epm_base &&
+			    fault_addr >= enc->mem_info.epm_base &&
+			    fault_addr < enc->mem_info.epm_base +
+					 enc->mem_info.epm_size) {
+				/* Demand-page: allocate 2MB block */
+				uint64_t block = alloc_data_block(
+					&g_mem_pool.data_pool, eid + CVM_NUM);
+				if (block == (uint64_t)-1) {
+					sbi_printf("[SM] enclave page fault: "
+						   "out of data blocks, eid=%u\n",
+						   eid);
+					rc = -1;
+					goto trap_done;
+				}
+				if (map_gpa_to_hpa(&g_mem_pool, eid + CVM_NUM,
+						   fault_addr, block,
+						   BLOCK_SIZE, IS_HUGE_PAGE,
+						   false)) {
+					sbi_printf("[SM] enclave page fault: "
+						   "map failed, eid=%u, "
+						   "addr=0x%lx\n",
+						   eid, fault_addr);
+					rc = -1;
+					goto trap_done;
+				}
+				__sbi_hfence_gvma_all();
+				rc = 0;
+			} else if (enc->mem_info.utm_base &&
+				   fault_addr >= enc->mem_info.utm_base &&
+				   fault_addr < enc->mem_info.utm_base +
+						enc->mem_info.utm_size) {
+				/* UTM fault: exit to host for setup */
+				deliver_trap_to_ree(regs->mepc, mcause, trap);
+				rc = sbi_sm_exit_enclave(
+					regs, eid,
+					ENCLAVE_STOP_PAGE_FAULT);
+			} else {
+				sbi_printf("[SM] enclave page fault: "
+					   "unmapped region, eid=%u, "
+					   "addr=0x%lx\n",
+					   eid, fault_addr);
+				rc = -1;
+			}
+		}
+		break;
+	default:
+		rc  = -1;
+		msg = "unhandled enclave exception";
+		goto trap_done;
+	}
+
+trap_done:
+	if (rc)
+		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
+			       trap->tinst, regs);
+
+	if (((regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT) != PRV_M)
+		sbi_sse_process_pending_events(regs);
+
+	sbi_trap_set_context(scratch, tcntx->prev_context);
+	return tcntx;
+}
+
+/*
+ * tee_dispatch_trap - Dispatch trap to CVM or Enclave handler based
+ * on the current Zion mode.
+ */
+struct sbi_trap_context *tee_dispatch_trap(struct sbi_trap_context *tcntx)
+{
+	zion_mode mode = hart_get_mode();
+
+	if (mode == ENCLAVE)
+		return enclave_trap_handler(tcntx);
+	else
+		return cvm_trap_handler(tcntx);
 }

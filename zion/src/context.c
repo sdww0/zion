@@ -88,6 +88,18 @@ static const unsigned long cvm_hedeleg =
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
 	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
 
+/* ENCLAVE - Eyrie runs in VS-mode, same delegation as CVM */
+static const unsigned long enclave_mideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const unsigned long enclave_hideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const unsigned long enclave_medeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+static const unsigned long enclave_hedeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+
 static bool invalid_registers_print = false;
 static const unsigned long guest_saved_reg_reset_sentinel = 0x1234;
 
@@ -305,6 +317,22 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_VSCAUSE, d_csrs->vscause);
 		csr_write(CSR_VSTVAL, d_csrs->vstval);
 		csr_write(CSR_VSATP, d_csrs->vsatp);
+	} else if (context_mode == REE_TO_ENCLAVE) {
+		/* Enclave uses VS-mode CSR set, same as CVM */
+		LOCAL_SWITCH_CSR(hstatus);
+		LOCAL_SWITCH_CSR(scounteren);
+		csr_write(CSR_HGATP, d_csrs->hgatp);
+		csr_write(CSR_HCOUNTEREN, d_csrs->hcounteren);
+
+		csr_write(CSR_VSSTATUS, d_csrs->vsstatus);
+		csr_write(CSR_VSIE, d_csrs->vsie);
+		csr_write(CSR_VSIP, d_csrs->vsip);
+		csr_write(CSR_VSTVEC, d_csrs->vstvec);
+		csr_write(CSR_VSSCRATCH, d_csrs->vsscratch);
+		csr_write(CSR_VSEPC, d_csrs->vsepc);
+		csr_write(CSR_VSCAUSE, d_csrs->vscause);
+		csr_write(CSR_VSTVAL, d_csrs->vstval);
+		csr_write(CSR_VSATP, d_csrs->vsatp);
 	}
 #undef LOCAL_SWITCH_CSR
 }
@@ -341,6 +369,23 @@ static inline void switch_from_csrs(struct sbi_trap_regs *regs,
 		s_csrs->vstval	   = csr_read_set(CSR_VSTVAL, 0);
 		s_csrs->hvip	   = csr_read_set(CSR_HVIP, 0);
 		s_csrs->vsatp	   = csr_read_set(CSR_VSATP, 0);
+	} else if (context_mode == REE_FROM_ENCLAVE) {
+		/* Save enclave VS-mode CSRs, restore REE CSRs */
+		LOCAL_SWITCH_CSR(hstatus);
+		LOCAL_SWITCH_CSR(scounteren);
+
+		s_csrs->hgatp	   = csr_read_set(CSR_HGATP, 0);
+		s_csrs->hcounteren = csr_read_set(CSR_HCOUNTEREN, 0);
+		s_csrs->vsstatus   = csr_read_set(CSR_VSSTATUS, 0);
+		s_csrs->vsie	   = csr_read_set(CSR_VSIE, 0);
+		s_csrs->vsip	   = csr_read_set(CSR_VSIP, 0);
+		s_csrs->vstvec	   = csr_read_set(CSR_VSTVEC, 0);
+		s_csrs->vsscratch  = csr_read_set(CSR_VSSCRATCH, 0);
+		s_csrs->vsepc	   = csr_read_set(CSR_VSEPC, 0);
+		s_csrs->vscause	   = csr_read_set(CSR_VSCAUSE, 0);
+		s_csrs->vstval	   = csr_read_set(CSR_VSTVAL, 0);
+		s_csrs->hvip	   = csr_read_set(CSR_HVIP, 0);
+		s_csrs->vsatp	   = csr_read_set(CSR_VSATP, 0);
 	}
 #undef LOCAL_SWITCH_CSR
 }
@@ -357,6 +402,11 @@ static inline void switch_trap_deleg(struct zion_state *state)
 		csr_write(CSR_HIDELEG, cvm_hideleg);
 		csr_write(CSR_MEDELEG, cvm_medeleg);
 		csr_write(CSR_HEDELEG, cvm_hedeleg);
+	} else if (state->mode == ENCLAVE) {
+		csr_write(CSR_MIDELEG, enclave_mideleg);
+		csr_write(CSR_HIDELEG, enclave_hideleg);
+		csr_write(CSR_MEDELEG, enclave_medeleg);
+		csr_write(CSR_HEDELEG, enclave_hedeleg);
 	}
 }
 
@@ -392,6 +442,11 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 		get_cvm_status_from_ree(regs, exit_cause, exit_mmio_reg,
 					channel);
 
+		switch_vector_to_tee();
+		pmp_set_zion(tee_region_id, PMP_ALL_PERM);
+		__sbi_hfence_gvma_all();
+	} else if (context_mode == REE_TO_ENCLAVE) {
+		/* Enclave: switch trap vector, lock PMP, flush TLB */
 		switch_vector_to_tee();
 		pmp_set_zion(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
