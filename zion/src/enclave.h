@@ -12,6 +12,7 @@ struct enclave_mem_info {
 	unsigned long epm_size;       /* EPM size in bytes */
 	unsigned long utm_base;       /* UTM GPA (Untrusted Shared Memory) */
 	unsigned long utm_size;       /* UTM size in bytes */
+	unsigned long host_utm_pa;    /* UTM host physical address */
 	unsigned long runtime_entry;  /* Eyrie runtime entry address */
 	unsigned long runtime_size;   /* Eyrie runtime size */
 	unsigned long user_entry;     /* User app entry address */
@@ -53,6 +54,9 @@ extern struct enclave enclaves[MAX_ENCLAVES];
 /* Enclave lifecycle */
 unsigned long create_enclave(unsigned long epm_base, unsigned long epm_size,
 			     unsigned long utm_base, unsigned long utm_size,
+			     unsigned long host_utm_pa,
+			     unsigned long runtime_entry,
+			     unsigned long user_entry,
 			     unsigned int *eid_out);
 unsigned long destroy_enclave(unsigned int eid);
 unsigned long run_enclave(struct sbi_trap_regs *regs, unsigned int eid);
@@ -68,13 +72,18 @@ unsigned long sbi_sm_create_enclave(struct sbi_trap_regs *regs,
 				    unsigned long epm_base,
 				    unsigned long epm_size,
 				    unsigned long utm_base,
-				    unsigned long utm_size);
+				    unsigned long utm_size,
+				    unsigned long host_utm_pa);
 unsigned long sbi_sm_destroy_enclave(struct sbi_trap_regs *regs,
 				     unsigned int eid);
 unsigned long sbi_sm_run_enclave(struct sbi_trap_regs *regs,
 				 unsigned int eid);
 unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
-				  unsigned int eid,
-				  unsigned int exit_cause);
+				  unsigned long eid,
+				  unsigned long exit_cause);
+unsigned long sbi_sm_set_enclave_entry(struct sbi_trap_regs *regs,
+				       unsigned long eid,
+				       unsigned long runtime_entry,
+				       unsigned long user_entry);
 
 #endif /* __ENCLAVE_H__ */

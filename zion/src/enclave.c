@@ -68,12 +68,18 @@ static void init_enclave_csrs(struct tee_csr *csrs, uintptr_t mstatus,
  * @epm_size: EPM size in bytes
  * @utm_base: Untrusted shared Memory guest-physical base
  * @utm_size: UTM size in bytes
+ * @host_utm_pa: Host physical address backing the UTM region
+ * @runtime_entry: Eyrie runtime entry point (GPA)
+ * @user_entry: User application entry point (GPA)
  * @eid_out:  receives the allocated enclave ID on success
  *
  * Returns 0 on success, -1 on failure.
  */
 unsigned long create_enclave(unsigned long epm_base, unsigned long epm_size,
 			     unsigned long utm_base, unsigned long utm_size,
+			     unsigned long host_utm_pa,
+			     unsigned long runtime_entry,
+			     unsigned long user_entry,
 			     unsigned int *eid_out)
 {
 	unsigned int eid;
@@ -109,8 +115,30 @@ unsigned long create_enclave(unsigned long epm_base, unsigned long epm_size,
 	enc->mem_info.epm_size = epm_size;
 	enc->mem_info.utm_base = utm_base;
 	enc->mem_info.utm_size = utm_size;
+	enc->mem_info.host_utm_pa = host_utm_pa;
+	enc->mem_info.runtime_entry = runtime_entry;
+	enc->mem_info.user_entry = user_entry;
 
 	enc->owner_rtid = (unsigned int)-1;
+
+	/* Map EPM: allocate physical blocks and build G-stage mappings */
+	if (enclave_map_epm(eid) != 0) {
+		sbi_printf("[SM] create_enclave(): EPM mapping failed\n");
+		reset_enclave_pt_pool(&g_mem_pool, eid);
+		free_enclave_eid(eid);
+		return -1;
+	}
+
+	/* Map UTM: host PA → enclave GPA in G-stage */
+	if (host_utm_pa && utm_size) {
+		if (enclave_map_utm(eid) != 0) {
+			sbi_printf("[SM] create_enclave(): UTM mapping failed\n");
+			free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
+			reset_enclave_pt_pool(&g_mem_pool, eid);
+			free_enclave_eid(eid);
+			return -1;
+		}
+	}
 
 	*eid_out = eid;
 
@@ -202,11 +230,14 @@ int enclave_map_epm(unsigned int eid)
 /*
  * enclave_map_utm - Map Untrusted shared Memory into G-stage page table.
  *
- * UTM is shared between host and enclave, mapped as read-write.
+ * UTM is backed by host physical memory (host_utm_pa). We map it into
+ * the enclave's G-stage at utm_base GPA so both host and enclave can
+ * access it. Uses 2MB huge pages.
  */
 int enclave_map_utm(unsigned int eid)
 {
 	struct enclave *enc;
+	size_t mapped = 0;
 
 	if (!enclave_eid_allocated(eid))
 		return -1;
@@ -216,13 +247,30 @@ int enclave_map_utm(unsigned int eid)
 	if (!enc->mem_info.utm_base || !enc->mem_info.utm_size)
 		return -1;
 
-	/*
-	 * UTM is mapped lazily. The host must ensure the backing memory
-	 * is accessible when the enclave first touches it. For now we
-	 * just validate the parameters.
-	 */
-	zion_printf("[SM] enclave_map_utm(): eid=%u, utm=0x%lx+0x%lx\n",
-		    eid, enc->mem_info.utm_base, enc->mem_info.utm_size);
+	if (!enc->mem_info.host_utm_pa) {
+		sbi_printf("[SM] enclave_map_utm(): no host UTM PA\n");
+		return -1;
+	}
+
+	while (mapped < enc->mem_info.utm_size) {
+		uint64_t gpa = enc->mem_info.utm_base + mapped;
+		uint64_t hpa = enc->mem_info.host_utm_pa + mapped;
+
+		if (map_gpa_to_hpa(&g_mem_pool, eid + CVM_NUM, gpa, hpa,
+				   BLOCK_SIZE, IS_HUGE_PAGE, false)) {
+			sbi_printf("[SM] enclave_map_utm(): map failed at "
+				   "gpa=0x%lx hpa=0x%lx\n", gpa, hpa);
+			return -1;
+		}
+
+		mapped += BLOCK_SIZE;
+	}
+
+	__sbi_hfence_gvma_all();
+
+	zion_printf("[SM] enclave_map_utm(): eid=%u, mapped 0x%lx bytes, "
+		    "host_pa=0x%lx\n",
+		    eid, mapped, enc->mem_info.host_utm_pa);
 
 	return 0;
 }
@@ -343,14 +391,16 @@ unsigned long sbi_sm_create_enclave(struct sbi_trap_regs *regs,
 				    unsigned long epm_base,
 				    unsigned long epm_size,
 				    unsigned long utm_base,
-				    unsigned long utm_size)
+				    unsigned long utm_size,
+				    unsigned long host_utm_pa)
 {
 	unsigned long ret;
 	unsigned int eid = 0;
 
 	(void)regs;
 
-	ret = create_enclave(epm_base, epm_size, utm_base, utm_size, &eid);
+	ret = create_enclave(epm_base, epm_size, utm_base, utm_size,
+			     host_utm_pa, 0, 0, &eid);
 	if (ret) {
 		sbi_printf("[SBI] sbi_sm_create_enclave() failed: ret=0x%lx\n",
 			   ret);
@@ -372,9 +422,9 @@ unsigned long sbi_sm_run_enclave(struct sbi_trap_regs *regs, unsigned int eid)
 {
 	return run_enclave(regs, eid);
 }
-
 unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
-				  unsigned int eid, unsigned int exit_cause)
+				  unsigned long eid,
+				  unsigned long exit_cause)
 {
 	unsigned long ret;
 
@@ -382,4 +432,28 @@ unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
 	if (!ret)
 		regs->mepc += 4; /* Skip ecall instruction */
 	return ret;
+}
+
+unsigned long sbi_sm_set_enclave_entry(struct sbi_trap_regs *regs,
+				       unsigned long eid,
+				       unsigned long runtime_entry,
+				       unsigned long user_entry)
+{
+	struct enclave *enc;
+
+	(void)regs;
+
+	if ((unsigned int)eid >= MAX_ENCLAVES ||
+	    !enclave_eid_allocated((unsigned int)eid))
+		return -1;
+
+	enc = &enclaves[(unsigned int)eid];
+	enc->mem_info.runtime_entry = runtime_entry;
+	enc->mem_info.user_entry = user_entry;
+
+	zion_printf("[SBI] set_enclave_entry: eid=%lu, runtime=0x%lx, "
+		    "user=0x%lx\n",
+		    eid, runtime_entry, user_entry);
+
+	return 0;
 }
