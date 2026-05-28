@@ -540,7 +540,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 					 enc->mem_info.epm_size) {
 				/* Demand-page: allocate 2MB block */
 				uint64_t block = alloc_data_block(
-					&g_mem_pool.data_pool, eid + CVM_NUM);
+					&g_mem_pool.data_pool, eid);
 				if (block == (uint64_t)-1) {
 					sbi_printf("[SM] enclave page fault: "
 						   "out of data blocks, eid=%u\n",

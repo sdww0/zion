@@ -323,14 +323,26 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, unsigned int eid)
 		/* Set Eyrie runtime entry point as mepc */
 		tthread->csrs.mepc = enc->mem_info.runtime_entry;
 
-		/* Set initial arguments for Eyrie:
-		 * a0 = untrusted_ptr (physical address of shared buffer)
-		 * a1 = untrusted_size
-		 * a2 = user_entry (application entry point)
+		/*
+		 * Set initial arguments for Eyrie eyrie_boot():
+		 *   a0 = dummy (0)
+		 *   a1 = dram_base (EPM base GPA)
+		 *   a2 = dram_size (EPM size)
+		 *   a3 = runtime_paddr (runtime entry = EPM base)
+		 *   a4 = user_paddr (user app entry point)
+		 *   a5 = free_paddr (free memory after user app)
+		 *   a6 = utm_vaddr (UTM GPA)
+		 *   a7 = utm_size
 		 */
-		tthread->gprs.a0 = enc->mem_info.untrusted_ptr;
-		tthread->gprs.a1 = enc->mem_info.untrusted_size;
-		tthread->gprs.a2 = enc->mem_info.user_entry;
+		tthread->gprs.a0 = 0;
+		tthread->gprs.a1 = enc->mem_info.epm_base;
+		tthread->gprs.a2 = enc->mem_info.epm_size;
+		tthread->gprs.a3 = enc->mem_info.runtime_entry;
+		tthread->gprs.a4 = enc->mem_info.user_entry;
+		tthread->gprs.a5 = enc->mem_info.epm_base +
+				   enc->mem_info.epm_size;
+		tthread->gprs.a6 = enc->mem_info.utm_base;
+		tthread->gprs.a7 = enc->mem_info.utm_size;
 
 		enc->inited = true;
 
