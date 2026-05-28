@@ -2,6 +2,7 @@
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_trap.h>
 #include "tee.h"
+#include "enclave.h"
 
 static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 				 struct sbi_trap_regs *regs,
@@ -88,6 +89,31 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 	case SBI_SM_CLEAN_SEC_MEM:
 		retval = sbi_sm_clean_sec_mem();
 		break;
+
+	/* Enclave SBI calls */
+	case SBI_SM_CREATE_ENCLAVE:
+		zion_printf("[SBI] SBI_SM_CREATE_ENCLAVE called\n");
+		retval = sbi_sm_create_enclave(regs, regs->a0, regs->a1,
+					       regs->a2, regs->a3);
+		break;
+	case SBI_SM_DESTROY_ENCLAVE:
+		zion_printf("[SBI] SBI_SM_DESTROY_ENCLAVE called\n");
+		retval = sbi_sm_destroy_enclave(regs, (unsigned int)regs->a0);
+		break;
+	case SBI_SM_RUN_ENCLAVE:
+		zion_printf("[SBI] SBI_SM_RUN_ENCLAVE called\n");
+		retval = sbi_sm_run_enclave(regs, (unsigned int)regs->a0);
+		if (!retval)
+			out->skip_regs_update = true;
+		break;
+	case SBI_SM_EXIT_ENCLAVE:
+		zion_printf("[SBI] SBI_SM_EXIT_ENCLAVE called\n");
+		retval = sbi_sm_exit_enclave(regs, (unsigned int)regs->a0,
+					     (unsigned int)regs->a1);
+		if (!retval)
+			out->skip_regs_update = true;
+		break;
+
 	default:
 		retval = -1;
 		sbi_printf("[SM] sbi_ecall_cvm_handler(): unknown SBI call\n");

@@ -21,3 +21,4 @@ zion-objs-y += src/ed25519/sc.o
 zion-objs-y += src/ed25519/sign.o
 zion-objs-y += src/hkdf_sha3_512/hkdf_sha3_512.o
 zion-objs-y += src/hmac_sha3/hmac_sha3.o
+zion-objs-y += src/enclave.o

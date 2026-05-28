@@ -1,4 +1,3 @@
-
 #ifndef __TEE_MEM_H__
 #define __TEE_MEM_H__
 
@@ -10,6 +9,7 @@
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_types.h>
 #include <sbi/riscv_locks.h>
+#include "zion.h"
 
 #define gstage_index_bits 9
 #define CVM_GSTAGE_MODE HGATP_MODE_SV48X4
@@ -67,11 +67,12 @@ typedef struct {
 	size_t offset; // Current page allocation offset in PAGE_SIZE units, with ROOT_PT_PAGES reserved for the root page table
 } pt_subpool_t;
 
-// The single page-table pool contains one sub-pool per CVM.
+// The page-table pool contains sub-pools for CVMs and Enclaves.
 typedef struct {
 	uint8_t *base; // Page-table pool base address
-	size_t total_size; // Total size in bytes: CVM_NUM * (PT_MEM_PER_CVM_MB * MB)
+	size_t total_size; // Total size in bytes
 	pt_subpool_t cvm[CVM_NUM]; // Per-CVM sub-pool metadata
+	pt_subpool_t enclave[MAX_ENCLAVES]; // Per-Enclave sub-pool metadata
 } pt_pool_t;
 
 typedef struct data_block {
@@ -111,5 +112,9 @@ int map_gpa_to_hpa(mem_pool_t *mp, int cvm_id, uint64_t gpa, uint64_t hpa,
 int tee_mem_init(uint8_t *mem_base, uint32_t n_page);
 void tee_security_check(unsigned long mtval, unsigned long mcause,
 			unsigned long raw_root_pt);
+
+/* Enclave page table pool functions */
+void *get_enclave_root_pt(mem_pool_t *mp, uint32_t enclave_id);
+void reset_enclave_pt_pool(mem_pool_t *mp, uint32_t enclave_id);
 
 #endif

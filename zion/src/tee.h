@@ -33,6 +33,15 @@
 #define SBI_SM_SHARE_MEM_TO 1032
 #define SBI_SM_SHARE_MEM_FROM 1033
 
+// enclave (Keystone compatible)
+#define SBI_SM_CREATE_ENCLAVE      2001
+#define SBI_SM_DESTROY_ENCLAVE     2002
+#define SBI_SM_RUN_ENCLAVE         2003
+#define SBI_SM_EXIT_ENCLAVE        2004
+#define SBI_SM_COPY_FROM_ENCLAVE   2005
+#define SBI_SM_COPY_TO_ENCLAVE     2006
+#define SBI_SM_MEMORY_RECLAIM      2007
+
 #define FID_RANGE_HOST 2999
 #define SBI_SM_RANDOM 3001
 
