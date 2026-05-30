@@ -52,12 +52,20 @@ struct enclave_region
   enum enclave_region_type type;
 };
 
+/* Zion extension: memory region info for G-stage demand paging */
+struct enclave_mem_info {
+  uintptr_t epm_base;
+  size_t    epm_size;
+  uintptr_t utm_base;
+  size_t    utm_size;
+};
+
 /* enclave metadata */
 struct enclave
 {
   //spinlock_t lock; //local enclave lock. we don't need this until we have multithreaded enclave
   enclave_id eid; //enclave id
-  unsigned long encl_satp; // enclave's page table base
+  unsigned long encl_satp; // enclave's page table base (Keystone: satp, Zion: hgatp)
   enclave_state state; // global state of the enclave
 
   /* Physical memory regions associate with this enclave */
@@ -75,6 +83,11 @@ struct enclave
   struct thread_state threads[MAX_ENCL_THREADS];
 
   struct platform_enclave_data ped;
+
+  /* Zion G-stage extensions (not used by original Keystone code) */
+  unsigned long hgatp;  // G-stage page table register value
+  unsigned long pgd;    // root page table physical address
+  struct enclave_mem_info mem_info; // for demand paging in trap handler
 };
 
 /* attestation reports */
@@ -105,6 +118,9 @@ struct sealing_key
   uint8_t key[SEALING_KEY_SIZE];
   uint8_t signature[SIGNATURE_SIZE];
 };
+
+/*** Global enclave array (defined in keystone/enclave.c) ***/
+extern struct enclave enclaves[ENCL_MAX];
 
 /*** SBI functions & external functions ***/
 // callables from the host

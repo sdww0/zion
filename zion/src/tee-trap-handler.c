@@ -463,8 +463,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			deliver_trap_to_ree(regs->mepc,
 					    interrupt_cause | interrupt_mask,
 					    trap);
-			rc = sbi_sm_exit_enclave(regs, eid,
-					       ENCLAVE_STOP_TIMER_INTERRUPT);
+			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
 			goto trap_done;
 		case IRQ_S_TIMER:
 			/*
@@ -475,8 +474,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			deliver_trap_to_ree(regs->mepc,
 					    interrupt_cause | interrupt_mask,
 					    trap);
-			rc = sbi_sm_exit_enclave(regs, eid,
-					       ENCLAVE_STOP_TIMER_INTERRUPT);
+			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
 			goto trap_done;
 		case IRQ_M_SOFT:
 			sbi_ipi_process();
@@ -487,8 +485,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			deliver_trap_to_ree(regs->mepc,
 					    interrupt_cause | interrupt_mask,
 					    trap);
-			rc = sbi_sm_exit_enclave(regs, eid,
-						 ENCLAVE_STOP_TIMER_INTERRUPT);
+			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
 			goto trap_done;
 		default:
 			msg = "unhandled enclave interrupt";
@@ -543,8 +540,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		} else {
 			/* Unknown ecall: exit enclave to host */
 			deliver_trap_to_ree(regs->mepc, mcause, trap);
-			rc = sbi_sm_exit_enclave(regs, eid,
-						 ENCLAVE_STOP_SYSCALL_HOST);
+			rc = exit_enclave(regs, eid);
 		}
 		break;
 	case CAUSE_FETCH_GUEST_PAGE_FAULT:
@@ -593,9 +589,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 						enc->mem_info.utm_size) {
 				/* UTM fault: exit to host for setup */
 				deliver_trap_to_ree(regs->mepc, mcause, trap);
-				rc = sbi_sm_exit_enclave(
-					regs, eid,
-					ENCLAVE_STOP_PAGE_FAULT);
+				rc = exit_enclave(regs, eid);
 			} else {
 				sbi_printf("[SM] enclave page fault: "
 					   "unmapped region, eid=%u, "

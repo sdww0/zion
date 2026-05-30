@@ -5,6 +5,7 @@
 #include "sm.h"
 #include "sbi/riscv_encoding.h"
 #include "sbi/sbi_hfence.h"
+#include TARGET_PLATFORM_HEADER
 
 mem_pool_t g_mem_pool;
 static data_block_t data_blocks_arr[MAX_DATA_BLOCKS];

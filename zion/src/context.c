@@ -453,12 +453,12 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 					channel);
 
 		switch_vector_to_tee();
-		pmp_set_zion(tee_region_id, PMP_ALL_PERM);
+		pmp_set_keystone(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == REE_TO_ENCLAVE) {
 		/* Enclave: switch trap vector, lock PMP, flush TLB */
 		switch_vector_to_tee();
-		pmp_set_zion(tee_region_id, PMP_ALL_PERM);
+		pmp_set_keystone(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
 	}
 	switch_trap_deleg(&d_tthread->state);
@@ -486,12 +486,12 @@ void context_switch_from(struct sbi_trap_regs *regs,
 				      extra_trap, channel);
 
 		switch_vector_to_ree();
-		pmp_set_zion(tee_region_id, PMP_NO_PERM);
+		pmp_set_keystone(tee_region_id, PMP_NO_PERM);
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == REE_FROM_ENCLAVE) {
 
 		switch_vector_to_ree();
-		pmp_set_zion(tee_region_id, PMP_NO_PERM);
+		pmp_set_keystone(tee_region_id, PMP_NO_PERM);
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == CVM_FROM_ENCLAVE) {
 

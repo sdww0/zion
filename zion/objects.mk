@@ -41,3 +41,12 @@ zion-objs-y += src/tee-sbi-opensbi.o
 zion-objs-y += src/plugins/plugins.o
 zion-objs-y += src/plugins/multimem.o
 zion-objs-y += src/keystone/trap_exit.o
+
+# Zion TEE infrastructure (CVM + Enclave G-stage support)
+zion-objs-y += src/tee.o
+zion-objs-y += src/tee-sbi.o
+zion-objs-y += src/cvm.o
+zion-objs-y += src/ree.o
+zion-objs-y += src/context.o
+zion-objs-y += src/tee-mem.o
+zion-objs-y += src/tee-trap-handler.o
