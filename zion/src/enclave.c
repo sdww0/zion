@@ -136,49 +136,6 @@ static int is_create_args_valid(struct keystone_sbi_create_t *args)
 	return 1;
 }
 
-/* ---- G-stage page table setup ---- */
-static int setup_enclave_gstage(enclave_id eid)
-{
-	uintptr_t epm_base = get_enclave_region_base(eid, 0);
-	size_t    epm_size = get_enclave_region_size(eid, 0);
-	uintptr_t utm_base = get_enclave_region_base(eid, 1);
-	size_t    utm_size = get_enclave_region_size(eid, 1);
-
-	if (!epm_base || !epm_size)
-		return -1;
-
-	/* Store memory info for trap handler */
-	enclaves[eid].mem_info.epm_base = epm_base;
-	enclaves[eid].mem_info.epm_size = epm_size;
-	enclaves[eid].mem_info.utm_base = utm_base;
-	enclaves[eid].mem_info.utm_size = utm_size;
-
-	/* Reset and build G-stage page table */
-	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
-	int enc_cvm_id = CVM_NUM + eid;
-
-	/* Map EPM: identity (GPA=HPA) */
-	if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
-			   epm_base, epm_base, epm_size, false, false))
-		return -1;
-
-	/* Map UTM if present */
-	if (utm_base && utm_size) {
-		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
-				   utm_base, utm_base, utm_size, false, false))
-			return -1;
-	}
-
-	/* Compute hgatp */
-	void *root_pt = get_enclave_root_pt(&g_mem_pool, (uint32_t)eid);
-	if (!root_pt)
-		return -1;
-
-	enclaves[eid].hgatp = ((unsigned long)root_pt >> PAGE_SHIFT) |
-			      (HGATP_MODE_SV39X4 << HGATP_MODE_SHIFT);
-
-	return 0;
-}
 
 /* ---- Initial tee_thread setup for enclave ---- */
 static void setup_enclave_thread(struct tee_thread *thread,
@@ -222,87 +179,139 @@ static void setup_enclave_thread(struct tee_thread *thread,
 unsigned long create_enclave(unsigned long *eidptr,
 			     struct keystone_sbi_create_t create_args)
 {
-	uintptr_t base = create_args.epm_region.paddr;
-	size_t size = create_args.epm_region.size;
-	uintptr_t utbase = create_args.utm_region.paddr;
-	size_t utsize = create_args.utm_region.size;
+	/*
+	 * Memory model:
+	 *   EPM GPA → allocated from secure memory pool (non-identity G-stage)
+	 *   UTM GPA → host-provided PA (shared memory, G-stage mapped)
+	 *
+	 * epm_region.paddr = REE source address (where enclave binary lives)
+	 * epm_region.size  = EPM size
+	 * utm_region.paddr = host UTM PA (for shared memory)
+	 * utm_region.size  = UTM size
+	 */
+	uintptr_t ree_src = create_args.epm_region.paddr; /* REE VA of enclave binary */
+	size_t epm_size   = create_args.epm_region.size;
+	uintptr_t utm_gpa = create_args.utm_region.paddr; /* UTM GPA (from driver) */
+	size_t utm_size   = create_args.utm_region.size;
+	uintptr_t host_utm_pa = create_args.runtime_paddr; /* host UTM PA */
 	enclave_id eid;
 	unsigned long ret;
-	int region, shared_region;
 
 	if (!is_create_args_valid(&create_args))
 		return SBI_ERR_SM_ENCLAVE_ILLEGAL_ARGUMENT;
-
-	/* Runtime params (used by Eyrie runtime) */
-	struct runtime_params_t params;
-	params.dram_base = base;
-	params.dram_size = size;
-	params.runtime_base = create_args.runtime_paddr;
-	params.user_base = create_args.user_paddr;
-	params.free_base = create_args.free_paddr;
-	params.untrusted_base = utbase;
-	params.untrusted_size = utsize;
-	params.free_requested = create_args.free_requested;
 
 	/* Allocate EID */
 	ret = encl_alloc_eid(&eid);
 	if (ret != SBI_ERR_SM_ENCLAVE_SUCCESS)
 		return ret;
 
-	/* Create PMP regions */
-	ret = SBI_ERR_SM_ENCLAVE_PMP_FAILURE;
-	if (pmp_region_init_atomic(base, size, PMP_PRI_ANY, &region, 0))
+	/* ---- Allocate EPM from secure memory pool ---- */
+	int n_blocks = (epm_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	uint64_t epm_blocks[16]; /* max 32MB (16 * 2MB) */
+	if (n_blocks > 16) {
+		ret = SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
 		goto free_eid;
-
-	if (pmp_region_init_atomic(utbase, utsize, PMP_PRI_BOTTOM,
-				   &shared_region, 0))
-		goto free_region;
-
-	/* Lock EPM from host access */
-	if (pmp_set_global(region, PMP_NO_PERM))
-		goto free_shared;
-
-	/* Initialize metadata */
-	enclaves[eid].eid = eid;
-	enclaves[eid].regions[0].pmp_rid = region;
-	enclaves[eid].regions[0].type = REGION_EPM;
-	enclaves[eid].regions[1].pmp_rid = shared_region;
-	enclaves[eid].regions[1].type = REGION_UTM;
-	enclaves[eid].n_thread = 0;
-	enclaves[eid].params = params;
-
-	/* Setup G-stage page tables */
-	if (setup_enclave_gstage(eid)) {
-		sbi_printf("[SM] create_enclave: eid=%d G-stage setup failed\n",
-			   eid);
-		goto unset_region;
 	}
 
-	/* Platform hook (optional enhancements) */
+	for (int i = 0; i < n_blocks; i++) {
+		uint64_t pa = alloc_data_block(&g_mem_pool.data_pool, eid);
+		if (pa == (uint64_t)-1) {
+			sbi_printf("[SM] create_enclave: eid=%d alloc block %d failed\n",
+				   eid, i);
+			ret = SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
+			goto free_blocks;
+		}
+		epm_blocks[i] = pa;
+		sbi_printf("[SM] create_enclave: eid=%d block[%d] pa=0x%lx\n",
+			   eid, i, pa);
+	}
+
+	/* ---- Build G-stage page table ---- */
+	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
+	int enc_cvm_id = CVM_NUM + eid;
+
+	/* EPM: map GPA (e.g. 0x80000000) → secure pool PA (non-identity) */
+	for (int i = 0; i < n_blocks; i++) {
+		uint64_t gpa = (uint64_t)i * BLOCK_SIZE; /* GPA 0, 2MB, 4MB... */
+		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
+				   gpa, epm_blocks[i], BLOCK_SIZE, true, false))
+			goto free_blocks;
+		sbi_printf("[SM] create_enclave: eid=%d G-stage gpa=0x%lx → hpa=0x%lx\n",
+			   eid, gpa, epm_blocks[i]);
+	}
+
+	/* UTM: map UTM GPA → host UTM PA */
+	if (utm_gpa && utm_size && host_utm_pa) {
+		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
+				   utm_gpa, host_utm_pa, utm_size, false, false))
+			goto free_blocks;
+		sbi_printf("[SM] create_enclave: eid=%d UTM gpa=0x%lx → hpa=0x%lx\n",
+			   eid, utm_gpa, host_utm_pa);
+	}
+
+	/* Compute hgatp */
+	void *root_pt = get_enclave_root_pt(&g_mem_pool, (uint32_t)eid);
+	if (!root_pt)
+		goto free_blocks;
+	uint64_t hgatp = ((unsigned long)root_pt >> PAGE_SHIFT) |
+			 (HGATP_MODE_SV39X4 << HGATP_MODE_SHIFT);
+
+	/* ---- Copy enclave content from REE → secure pool ---- */
+	for (int i = 0; i < n_blocks; i++) {
+		size_t chunk = (i == n_blocks - 1) ?
+			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
+		/* MPRV copy: src=REE memory, dst=secure pool PA */
+		int err = copy_to_sm((void *)epm_blocks[i],
+				     ree_src + i * BLOCK_SIZE, chunk);
+		if (err) {
+			sbi_printf("[SM] create_enclave: eid=%d copy block %d failed\n",
+				   eid, i);
+			goto free_blocks;
+		}
+	}
+
+	/* ---- Fill enclave metadata ---- */
+	enclaves[eid].eid = eid;
+	enclaves[eid].n_thread = 0;
+	enclaves[eid].hgatp = hgatp;
+	enclaves[eid].mem_info.epm_base = 0; /* GPA 0 is start of EPM mapping */
+	enclaves[eid].mem_info.epm_size = epm_size;
+	enclaves[eid].mem_info.utm_base = utm_gpa;
+	enclaves[eid].mem_info.utm_size = utm_size;
+	enclaves[eid].active_thread = NULL;
+	enclaves[eid].saved_mepc = 0;
+
+	/* Runtime params (Eyrie expects these) */
+	struct runtime_params_t *p = &enclaves[eid].params;
+	p->dram_base = 0;          /* EPM starts at GPA 0 */
+	p->dram_size = epm_size;
+	p->runtime_base = create_args.runtime_paddr; /* offset within EPM */
+	p->user_base = create_args.user_paddr;
+	p->free_base = create_args.free_paddr;
+	p->untrusted_base = utm_gpa;
+	p->untrusted_size = utm_size;
+	p->free_requested = create_args.free_requested;
+
+	/* Platform hook */
 	ret = platform_create_enclave(&enclaves[eid]);
 	if (ret)
-		goto unset_region;
+		goto free_blocks;
 
-	/* Attestation hash (placeholder — full validation TBD) */
 	ret = validate_and_hash_enclave(&enclaves[eid]);
 	if (ret)
-		goto unset_region;
+		goto free_blocks;
 
 	spin_lock(&encl_lock);
 	enclaves[eid].state = FRESH;
 	spin_unlock(&encl_lock);
 
 	*eidptr = eid;
-	sbi_printf("[SM] create_enclave: eid=%d base=0x%lx size=0x%lx hgatp=0x%lx\n",
-		   eid, base, size, enclaves[eid].hgatp);
+	sbi_printf("[SM] create_enclave: eid=%d epm_size=0x%lx hgatp=0x%lx\n",
+		   eid, epm_size, hgatp);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 
-unset_region:
-	pmp_unset_global(region);
-free_shared:
-	pmp_region_free_atomic(shared_region);
-free_region:
-	pmp_region_free_atomic(region);
+free_blocks:
+	free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
 free_eid:
 	encl_free_eid(eid);
 	return ret;
@@ -318,29 +327,21 @@ unsigned long destroy_enclave(enclave_id eid)
 	enclaves[eid].state = DESTROYING;
 	spin_unlock(&encl_lock);
 
-	platform_destroy_enclave(&enclaves[eid]);
-
-	/* Clear enclave memory and free PMP regions */
-	for (int i = 0; i < ENCLAVE_REGIONS_MAX; i++) {
-		if (enclaves[eid].regions[i].type == REGION_INVALID ||
-		    enclaves[eid].regions[i].type == REGION_UTM)
-			continue;
-		region_id rid = enclaves[eid].regions[i].pmp_rid;
-		void *base = (void *)pmp_region_get_addr(rid);
-		size_t size = pmp_region_get_size(rid);
-		sbi_memset(base, 0, size);
-		pmp_unset_global(rid);
-		pmp_region_free_atomic(rid);
+	/* Free active thread if still allocated (stop without exit) */
+	if (enclaves[eid].active_thread) {
+		tee_thread_free(enclaves[eid].active_thread);
+		enclaves[eid].active_thread = NULL;
 	}
 
-	int utm_idx = get_enclave_region_index(eid, REGION_UTM);
-	if (utm_idx != -1)
-		pmp_region_free_atomic(enclaves[eid].regions[utm_idx].pmp_rid);
+	platform_destroy_enclave(&enclaves[eid]);
+
+	/* Free data blocks from secure memory pool */
+	free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
 
 	enclaves[eid].hgatp = 0;
 	enclaves[eid].encl_satp = 0;
 
-	/* Release enclave PT pool */
+	/* Release enclave G-stage PT pool */
 	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
 
 	encl_free_eid(eid);
