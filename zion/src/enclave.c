@@ -228,13 +228,12 @@ unsigned long create_enclave(unsigned long *eidptr,
 	for (int i = 0; i < n_blocks; i++) {
 		size_t chunk = (i == n_blocks - 1) ?
 			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
-		int err = copy_to_sm((void *)epm_blocks[i],
-				     epm_pa + i * BLOCK_SIZE, chunk);
-		if (err) {
-			sbi_printf("[SM] create_enclave: eid=%d copy block %d failed\n",
-				   eid, i);
-			goto free_blocks;
-		}
+		/* M-mode direct PA access — no MPRV needed.
+		 * src (epm_pa) is kernel-allocated physical memory,
+		 * dst (epm_blocks[i]) is secure pool physical memory.
+		 * Both accessible from M-mode without page table walk. */
+		sbi_memcpy((void *)epm_blocks[i],
+			   (void *)(epm_pa + i * BLOCK_SIZE), chunk);
 	}
 
 	/* ---- Build G-stage page table ---- */

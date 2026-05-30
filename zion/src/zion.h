@@ -51,7 +51,7 @@ struct zion_state {
 void zion_init(bool cold_boot);
 void zion_enable_counters(void);
 
-// #define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define zion_printf(...) \
 	do {                 \
