@@ -433,35 +433,50 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 	ulong mcause		    = tcntx->trap.cause;
 	ulong interrupt_mask	    = 1UL << (__riscv_xlen - 1);
 
+	sbi_printf("[SM] enclave_trap_handler: mcause=0x%lx mepc=0x%lx mstatus=0x%lx\n",
+		   mcause, regs->mepc, regs->mstatus);
+
 	/* Update trap context pointer */
 	tcntx->prev_context = sbi_trap_get_context(scratch);
 	sbi_trap_set_context(scratch, tcntx);
 
-	if (!(regs->mstatus & MSTATUS_MPV)) {
-		sbi_printf(
-			"[SM] !!!ERROR!!! in enclave_trap_handler!!! mepc=%lx, mcause=%lx, mstatus=%lx\n",
-			regs->mepc, mcause, regs->mstatus);
-		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
-			       trap->tinst, regs);
-		sbi_hart_hang();
-	}
-
 	unsigned int eid = hart_get_caller_rtid();
 
-	/* Interrupt handling */
+	/*
+	 * Handle interrupts before the MPV check.  S-mode timer interrupts
+	 * delivered to M-mode may not preserve MPV in the saved mstatus
+	 * (hardware clears it on certain trap transitions).  Interrupts
+	 * have their own dispatch logic and do not require MPV=1.
+	 */
 	if (mcause & interrupt_mask) {
 		ulong interrupt_cause = mcause & ~interrupt_mask;
 
 		switch (interrupt_cause) {
 		case IRQ_M_TIMER:
-			sbi_timer_process();
-			rc = 0;
+			/*
+			 * Keystone approach: M-timer fired during enclave execution
+			 * (host kernel programmed mtimecmp via SBI). Stop the enclave
+			 * (not destroy), return to host. Host kernel will service the
+			 * timer and resume. This is the primary timer path when sstc
+			 * is disabled.
+			 */
+			deliver_trap_to_ree(regs->mepc,
+					    interrupt_cause | interrupt_mask,
+					    trap);
+			rc = sbi_sm_exit_enclave(regs, eid,
+					       ENCLAVE_STOP_TIMER_INTERRUPT);
 			goto trap_done;
 		case IRQ_S_TIMER:
+			/*
+			 * S-timer fired during enclave execution (sstc was enabled
+			 * by kernel before SM disabled it, or race condition).
+			 * Same handling as M-timer: stop enclave, return to host.
+			 */
 			deliver_trap_to_ree(regs->mepc,
-					    IRQ_S_TIMER | interrupt_mask, trap);
+					    interrupt_cause | interrupt_mask,
+					    trap);
 			rc = sbi_sm_exit_enclave(regs, eid,
-						 ENCLAVE_STOP_TIMER_INTERRUPT);
+					       ENCLAVE_STOP_TIMER_INTERRUPT);
 			goto trap_done;
 		case IRQ_M_SOFT:
 			sbi_ipi_process();
@@ -482,7 +497,16 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		}
 	}
 
-	/* Exception handling */
+	/* Exception handling -- require valid virtual-mode context */
+	if (!(regs->mstatus & MSTATUS_MPV)) {
+		sbi_printf(
+			"[SM] !!!ERROR!!! in enclave_trap_handler!!! mepc=%lx, mcause=%lx, mstatus=%lx\n",
+			regs->mepc, mcause, regs->mstatus);
+		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
+			       trap->tinst, regs);
+		sbi_hart_hang();
+	}
+
 	switch (mcause) {
 	case CAUSE_ILLEGAL_INSTRUCTION:
 		rc  = sbi_illegal_insn_handler(tcntx);
@@ -504,12 +528,14 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		/* Fall through to VS-mode ecall handling */
 		/* fallthrough */
 	case CAUSE_VIRTUAL_SUPERVISOR_ECALL:
-		/*
-		 * Eyrie's SBI ecall. If it's a Zion SBI call, handle it
-		 * in M-mode. Otherwise, exit enclave and let host handle it.
-		 */
+		sbi_printf("[SM] enclave VS-ecall: a7=0x%lx a6=0x%lx a0=0x%lx\n",
+			   regs->a7, regs->a6, regs->a0);
 		if (is_zion_sbi(regs->a7)) {
 			rc = sbi_ecall_handler(tcntx);
+		} else if (regs->a7 == SBI_EXT_0_1_CONSOLE_PUTCHAR) {
+			/* Eyrie legacy putchar: a0 = character */
+			sbi_printf("%c", (char)regs->a0);
+			rc = 0;
 		} else if (regs->a7 == SBI_EXT_DBCN &&
 			   regs->a6 == SBI_EXT_DBCN_CONSOLE_WRITE_BYTE) {
 			sbi_printf("%c", (char)regs->a0);
@@ -604,6 +630,8 @@ trap_done:
 struct sbi_trap_context *tee_dispatch_trap(struct sbi_trap_context *tcntx)
 {
 	zion_mode mode = hart_get_mode();
+	sbi_printf("[SM] tee_dispatch_trap: mode=%d mcause=0x%lx mepc=0x%lx mstatus=0x%lx\n",
+		   mode, tcntx->trap.cause, tcntx->regs.mepc, tcntx->regs.mstatus);
 
 	if (mode == ENCLAVE)
 		return enclave_trap_handler(tcntx);

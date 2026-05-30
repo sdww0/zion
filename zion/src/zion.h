@@ -13,7 +13,7 @@
 #define MAX_SHARED_MEMS 4
 
 /* Enclave limits */
-#define MAX_ENCLAVES 8
+#define MAX_ENCLAVES 4
 #define MAX_ENCLAVE_VCPUS 1  /* Keystone enclave is single-hart */
 #define PT_MEM_PER_ENCLAVE_MB 2  /* 2MB page table pool per enclave */
 

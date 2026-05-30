@@ -45,7 +45,7 @@
 #define IS_HUGE_PAGE false
 #endif
 
-#define CVM_NUM 4
+#define CVM_NUM 0
 #define PT_MEM_PER_CVM_MB 4
 
 // Partial PTE flag definitions

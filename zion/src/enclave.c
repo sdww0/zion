@@ -1,471 +1,697 @@
-#include <sbi/riscv_asm.h>
-#include <sbi/riscv_encoding.h>
-#include <sbi/sbi_trap.h>
-#include <sbi/sbi_console.h>
-#include <sbi/sbi_hart.h>
-#include <sbi/sbi_hfence.h>
-#include <sbi/sbi_string.h>
+//******************************************************************************
+// Copyright (c) 2018, The Regents of the University of California (Regents).
+// All Rights Reserved. See LICENSE for license details.
+//------------------------------------------------------------------------------
 #include "enclave.h"
-#include "context.h"
-#include "tee-mem.h"
 #include "mprv.h"
-#include "ree.h"
+#include "pmp.h"
+#include "page.h"
+#include "cpu.h"
+#include "platform-hook.h"
+#include <sbi/sbi_string.h>
+#include <sbi/riscv_asm.h>
+#include <sbi/riscv_locks.h>
+#include <sbi/sbi_console.h>
 
-struct enclave enclaves[MAX_ENCLAVES];
-static unsigned long enclaves_alloc_bitmap = 0;
+struct enclave enclaves[ENCL_MAX];
 
-static void reset_enclave_metadata(unsigned int eid)
-{
-	if (eid >= MAX_ENCLAVES)
-		return;
+// Enclave IDs are unsigned ints, so we do not need to check if eid is
+// greater than or equal to 0
+#define ENCLAVE_EXISTS(eid) (eid < ENCL_MAX && enclaves[eid].state >= 0)
 
-	sbi_memset(&enclaves[eid], 0, sizeof(enclaves[eid]));
-	enclaves[eid].owner_rtid = (unsigned int)-1;
+static spinlock_t encl_lock = SPIN_LOCK_INITIALIZER;
+
+extern void save_host_regs(void);
+extern void restore_host_regs(void);
+extern byte dev_public_key[PUBLIC_KEY_SIZE];
+
+/****************************
+ *
+ * Enclave utility functions
+ * Internal use by SBI calls
+ *
+ ****************************/
+
+/* Internal function containing the core of the context switching
+ * code to the enclave.
+ *
+ * Used by resume_enclave and run_enclave.
+ *
+ * Expects that eid has already been valided, and it is OK to run this enclave
+*/
+static inline void context_switch_to_enclave(struct sbi_trap_regs* regs,
+                                                enclave_id eid,
+                                                int load_parameters){
+  /* save host context */
+  swap_prev_state(&enclaves[eid].threads[0], regs, 1);
+  swap_prev_mepc(&enclaves[eid].threads[0], regs, regs->mepc);
+  swap_prev_mstatus(&enclaves[eid].threads[0], regs, regs->mstatus);
+
+  /* On first run (load_parameters=1), MPP is set to S-mode inside the block below.
+   * On resume, swap_prev_mstatus already restores the enclave's saved mstatus
+   * (with MPP=U for eapp). Do NOT override MPP here — the eapp runs in U-mode
+   * and needs MPP=U so mret returns to U-mode. Overriding MPP=S would cause
+   * the eapp to run in S-mode without SUM, triggering instruction page faults
+   * on PTE_U pages. */
+
+  uintptr_t interrupts = 0;
+  csr_write(mideleg, interrupts);
+
+  /* Set medeleg for enclave: delegate page faults + ecall to S-mode
+   * so the loader's csrw satp fault goes to stvec (runtime _start). */
+  static const unsigned long enclave_medeleg_local =
+    (1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+    (1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
+    (1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+  csr_write(CSR_MEDELEG, enclave_medeleg_local);
+
+  if(load_parameters) {
+    // passing parameters for a first run
+    regs->mepc = (uintptr_t) enclaves[eid].params.dram_base - 4; // regs->mepc will be +4 before sbi_ecall_handler return
+    regs->mstatus = (1 << MSTATUS_MPP_SHIFT);
+    // $a1: (PA) DRAM base,
+    regs->a1 = (uintptr_t) enclaves[eid].params.dram_base;
+    // $a2: DRAM size,
+    regs->a2 = (uintptr_t) enclaves[eid].params.dram_size;
+    // $a3: (PA) kernel location,
+    regs->a3 = (uintptr_t) enclaves[eid].params.runtime_base;
+    // $a4: (PA) user location,
+    regs->a4 = (uintptr_t) enclaves[eid].params.user_base;
+    // $a5: (PA) freemem location,
+    regs->a5 = (uintptr_t) enclaves[eid].params.free_base;
+    // $a6: (PA) utm base,
+    regs->a6 = (uintptr_t) enclaves[eid].params.untrusted_base;
+    // $a7: utm size
+    regs->a7 = (uintptr_t) enclaves[eid].params.untrusted_size;
+
+    // enclave will only have physical addresses in the first run
+    csr_write(satp, 0);
+  }
+
+  switch_vector_enclave();
+
+  // set PMP
+  osm_pmp_set(PMP_NO_PERM);
+  int memid;
+  for(memid=0; memid < ENCLAVE_REGIONS_MAX; memid++) {
+    if(enclaves[eid].regions[memid].type != REGION_INVALID) {
+      pmp_set_keystone(enclaves[eid].regions[memid].pmp_rid, PMP_ALL_PERM);
+    }
+  }
+
+  // Setup any platform specific defenses
+  platform_switch_to_enclave(&(enclaves[eid]));
+  cpu_enter_enclave_context(eid);
 }
 
-static bool enclave_eid_allocated(unsigned int eid)
-{
-	return eid < MAX_ENCLAVES && (enclaves_alloc_bitmap & (1UL << eid));
+static inline void context_switch_to_host(struct sbi_trap_regs *regs,
+    enclave_id eid,
+    int return_on_resume){
+
+  // set PMP
+  int memid;
+  for(memid=0; memid < ENCLAVE_REGIONS_MAX; memid++) {
+    if(enclaves[eid].regions[memid].type != REGION_INVALID) {
+      pmp_set_keystone(enclaves[eid].regions[memid].pmp_rid, PMP_NO_PERM);
+    }
+  }
+  osm_pmp_set(PMP_ALL_PERM);
+
+  uintptr_t interrupts = MIP_SSIP | MIP_STIP | MIP_SEIP;
+  csr_write(mideleg, interrupts);
+
+  /* restore host context */
+  swap_prev_state(&enclaves[eid].threads[0], regs, return_on_resume);
+  swap_prev_mepc(&enclaves[eid].threads[0], regs, regs->mepc);
+  swap_prev_mstatus(&enclaves[eid].threads[0], regs, regs->mstatus);
+
+  switch_vector_host();
+
+  uintptr_t pending = csr_read(mip);
+
+  if (pending & MIP_MTIP) {
+    csr_clear(mip, MIP_MTIP);
+    csr_set(mip, MIP_STIP);
+  }
+  if (pending & MIP_MSIP) {
+    csr_clear(mip, MIP_MSIP);
+    csr_set(mip, MIP_SSIP);
+  }
+  if (pending & MIP_MEIP) {
+    csr_clear(mip, MIP_MEIP);
+    csr_set(mip, MIP_SEIP);
+  }
+
+  // Reconfigure platform specific defenses
+  platform_switch_from_enclave(&(enclaves[eid]));
+
+  cpu_exit_enclave_context();
+
+  return;
 }
 
-static int alloc_enclave_eid(unsigned int *eid)
-{
-	for (unsigned int i = 0; i < MAX_ENCLAVES; i++) {
-		if (enclaves_alloc_bitmap & (1UL << i))
-			continue;
 
-		enclaves_alloc_bitmap |= (1UL << i);
-		*eid = i;
-		return 0;
-	}
+// TODO: This function is externally used.
+// refactoring needed
+/*
+ * Init all metadata as needed for keeping track of enclaves
+ * Called once by the SM on startup
+ */
+void enclave_init_metadata(void){
+  enclave_id eid;
+  int i=0;
 
-	return -1;
+  /* Assumes eids are incrementing values, which they are for now */
+  for(eid=0; eid < ENCL_MAX; eid++){
+    enclaves[eid].state = INVALID;
+
+    // Clear out regions
+    for(i=0; i < ENCLAVE_REGIONS_MAX; i++){
+      enclaves[eid].regions[i].type = REGION_INVALID;
+    }
+    /* Fire all platform specific init for each enclave */
+    platform_init_enclave(&(enclaves[eid]));
+  }
+
 }
 
-static void free_enclave_eid(unsigned int eid)
+static unsigned long clean_enclave_memory(uintptr_t utbase, uintptr_t utsize)
 {
-	if (eid >= MAX_ENCLAVES)
-		return;
 
-	enclaves_alloc_bitmap &= ~(1UL << eid);
+  // This function is quite temporary. See issue #38
+
+  // Zero out the untrusted memory region, since it may be in
+  // indeterminate state.
+  sbi_memset((void*)utbase, 0, utsize);
+
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-static void init_enclave_csrs(struct tee_csr *csrs, uintptr_t mstatus,
-			      unsigned long hgatp)
+static unsigned long encl_alloc_eid(enclave_id* _eid)
 {
-	csrs->mstatus = mstatus;
-	csrs->hstatus = HSTATUS_VTW | HSTATUS_SPVP | HSTATUS_SPV;
-	csrs->scounteren = ZION_COUNTER_ENABLE_MASK;
-	csrs->hcounteren = -1UL;
-	csrs->hvip = 0;
-	csrs->hgatp = hgatp & ~HGATP_VMID_MASK;
+  enclave_id eid;
+
+  spin_lock(&encl_lock);
+
+  for(eid=0; eid<ENCL_MAX; eid++)
+  {
+    if(enclaves[eid].state == INVALID){
+      break;
+    }
+  }
+  if(eid != ENCL_MAX)
+    enclaves[eid].state = ALLOCATED;
+
+  spin_unlock(&encl_lock);
+
+  if(eid != ENCL_MAX){
+    *_eid = eid;
+    return SBI_ERR_SM_ENCLAVE_SUCCESS;
+  }
+  else{
+    return SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
+  }
+}
+
+static unsigned long encl_free_eid(enclave_id eid)
+{
+  spin_lock(&encl_lock);
+  enclaves[eid].state = INVALID;
+  spin_unlock(&encl_lock);
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
+}
+
+int get_enclave_region_index(enclave_id eid, enum enclave_region_type type){
+  size_t i;
+  for(i = 0;i < ENCLAVE_REGIONS_MAX; i++){
+    if(enclaves[eid].regions[i].type == type){
+      return i;
+    }
+  }
+  // No such region for this enclave
+  return -1;
+}
+
+uintptr_t get_enclave_region_size(enclave_id eid, int memid)
+{
+  if (0 <= memid && memid < ENCLAVE_REGIONS_MAX)
+    return pmp_region_get_size(enclaves[eid].regions[memid].pmp_rid);
+
+  return 0;
+}
+
+uintptr_t get_enclave_region_base(enclave_id eid, int memid)
+{
+  if (0 <= memid && memid < ENCLAVE_REGIONS_MAX)
+    return pmp_region_get_addr(enclaves[eid].regions[memid].pmp_rid);
+
+  return 0;
+}
+
+// TODO: This function is externally used by sm-sbi.c.
+// Change it to be internal (remove from the enclave.h and make static)
+/* Internal function enforcing a copy source is from the untrusted world.
+ * Does NOT do verification of dest, assumes caller knows what that is.
+ * Dest should be inside the SM memory.
+ */
+unsigned long copy_enclave_create_args(uintptr_t src, struct keystone_sbi_create_t* dest){
+
+  int region_overlap = copy_to_sm(dest, src, sizeof(struct keystone_sbi_create_t));
+
+  if (region_overlap)
+    return SBI_ERR_SM_ENCLAVE_REGION_OVERLAPS;
+  else
+    return SBI_ERR_SM_ENCLAVE_SUCCESS;
+}
+
+/* copies data from enclave, source must be inside EPM */
+static unsigned long copy_enclave_data(struct enclave* enclave,
+                                          void* dest, uintptr_t source, size_t size) {
+
+  int illegal = copy_to_sm(dest, source, size);
+
+  if(illegal)
+    return SBI_ERR_SM_ENCLAVE_ILLEGAL_ARGUMENT;
+  else
+    return SBI_ERR_SM_ENCLAVE_SUCCESS;
+}
+
+/* copies data into enclave, destination must be inside EPM */
+static unsigned long copy_enclave_report(struct enclave* enclave,
+                                            uintptr_t dest, struct report* source) {
+
+  int illegal = copy_from_sm(dest, source, sizeof(struct report));
+
+  if(illegal)
+    return SBI_ERR_SM_ENCLAVE_ILLEGAL_ARGUMENT;
+  else
+    return SBI_ERR_SM_ENCLAVE_SUCCESS;
+}
+
+static int is_create_args_valid(struct keystone_sbi_create_t* args)
+{
+  uintptr_t epm_start, epm_end;
+
+  /* printm("[create args info]: \r\n\tepm_addr: %llx\r\n\tepmsize: %llx\r\n\tutm_addr: %llx\r\n\tutmsize: %llx\r\n\truntime_addr: %llx\r\n\tuser_addr: %llx\r\n\tfree_addr: %llx\r\n", */
+  /*        args->epm_region.paddr, */
+  /*        args->epm_region.size, */
+  /*        args->utm_region.paddr, */
+  /*        args->utm_region.size, */
+  /*        args->runtime_paddr, */
+  /*        args->user_paddr, */
+  /*        args->free_paddr); */
+
+  // check if physical addresses are valid
+  if (args->epm_region.size <= 0)
+    return 0;
+
+  // check if overflow
+  if (args->epm_region.paddr >=
+      args->epm_region.paddr + args->epm_region.size)
+    return 0;
+  if (args->utm_region.paddr >=
+      args->utm_region.paddr + args->utm_region.size)
+    return 0;
+
+  epm_start = args->epm_region.paddr;
+  epm_end = args->epm_region.paddr + args->epm_region.size;
+
+  // check if physical addresses are in the range
+  if (args->runtime_paddr < epm_start ||
+      args->runtime_paddr >= epm_end)
+    return 0;
+  if (args->user_paddr < epm_start ||
+      args->user_paddr >= epm_end)
+    return 0;
+  if (args->free_paddr < epm_start ||
+      args->free_paddr > epm_end)
+      // note: free_paddr == epm_end if there's no free memory
+    return 0;
+
+  // check the order of physical addresses
+  if (args->runtime_paddr > args->user_paddr)
+    return 0;
+  if (args->user_paddr > args->free_paddr)
+    return 0;
+  
+  return 1;
+}
+
+/*********************************
+ *
+ * Enclave SBI functions
+ * These are exposed to S-mode via the sm-sbi interface
+ *
+ *********************************/
+
+
+/* This handles creation of a new enclave, based on arguments provided
+ * by the untrusted host.
+ *
+ * This may fail if: it cannot allocate PMP regions, EIDs, etc
+ */
+unsigned long create_enclave(unsigned long *eidptr, struct keystone_sbi_create_t create_args)
+{
+  /* EPM and UTM parameters */
+  uintptr_t base = create_args.epm_region.paddr;
+  size_t size = create_args.epm_region.size;
+  uintptr_t utbase = create_args.utm_region.paddr;
+  size_t utsize = create_args.utm_region.size;
+
+  enclave_id eid;
+  unsigned long ret;
+  int region, shared_region;
+
+  /* Runtime parameters */
+  if(!is_create_args_valid(&create_args))
+    return SBI_ERR_SM_ENCLAVE_ILLEGAL_ARGUMENT;
+
+  /* set params */
+  struct runtime_params_t params;
+  params.dram_base = base;
+  params.dram_size = size;
+  params.runtime_base = create_args.runtime_paddr;
+  params.user_base = create_args.user_paddr;
+  params.free_base = create_args.free_paddr;
+  params.untrusted_base = utbase;
+  params.untrusted_size = utsize;
+  params.free_requested = create_args.free_requested;
+
+
+  // allocate eid
+  ret = SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
+  if (encl_alloc_eid(&eid) != SBI_ERR_SM_ENCLAVE_SUCCESS)
+    goto error;
+
+  // create a PMP region bound to the enclave
+  ret = SBI_ERR_SM_ENCLAVE_PMP_FAILURE;
+  if(pmp_region_init_atomic(base, size, PMP_PRI_ANY, &region, 0))
+    goto free_encl_idx;
+
+  // create PMP region for shared memory
+  if(pmp_region_init_atomic(utbase, utsize, PMP_PRI_BOTTOM, &shared_region, 0))
+    goto free_region;
+
+  // set pmp registers for private region (not shared)
+  if(pmp_set_global(region, PMP_NO_PERM))
+    goto free_shared_region;
+
+  // cleanup some memory regions for sanity See issue #38
+  clean_enclave_memory(utbase, utsize);
+
+
+  // initialize enclave metadata
+  enclaves[eid].eid = eid;
+
+  enclaves[eid].regions[0].pmp_rid = region;
+  enclaves[eid].regions[0].type = REGION_EPM;
+  enclaves[eid].regions[1].pmp_rid = shared_region;
+  enclaves[eid].regions[1].type = REGION_UTM;
+#if __riscv_xlen == 32
+  enclaves[eid].encl_satp = ((base >> RISCV_PGSHIFT) | (SATP_MODE_SV32 << HGATP_MODE_SHIFT));
+#else
+  enclaves[eid].encl_satp = ((base >> RISCV_PGSHIFT) | (SATP_MODE_SV39 << HGATP_MODE_SHIFT));
+#endif
+  enclaves[eid].n_thread = 0;
+  enclaves[eid].params = params;
+
+  /* Init enclave state (regs etc) */
+  clean_state(&enclaves[eid].threads[0]);
+
+  /* Platform create happens as the last thing before hashing/etc since
+     it may modify the enclave struct */
+  ret = platform_create_enclave(&enclaves[eid]);
+  if (ret)
+    goto unset_region;
+
+  /* Validate memory, prepare hash and signature for attestation */
+  spin_lock(&encl_lock); // FIXME This should error for second enter.
+ 
+  ret = validate_and_hash_enclave(&enclaves[eid]);
+  /* The enclave is fresh if it has been validated and hashed but not run yet. */
+  if (ret)
+    goto unlock;
+
+  enclaves[eid].state = FRESH;
+  /* EIDs are unsigned int in size, copy via simple copy */
+  *eidptr = eid;
+
+  spin_unlock(&encl_lock);
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
+
+unlock:
+  spin_unlock(&encl_lock);
+// free_platform:
+  platform_destroy_enclave(&enclaves[eid]);
+unset_region:
+  pmp_unset_global(region);
+free_shared_region:
+  pmp_region_free_atomic(shared_region);
+free_region:
+  pmp_region_free_atomic(region);
+free_encl_idx:
+  encl_free_eid(eid);
+error:
+  return ret;
 }
 
 /*
- * create_enclave - Allocate and initialize an enclave structure.
- *
- * @epm_base: Enclave Private Memory guest-physical base
- * @epm_size: EPM size in bytes
- * @utm_base: Untrusted shared Memory guest-physical base
- * @utm_size: UTM size in bytes
- * @host_utm_pa: Host physical address backing the UTM region
- * @runtime_entry: Eyrie runtime entry point (GPA)
- * @user_entry: User application entry point (GPA)
- * @eid_out:  receives the allocated enclave ID on success
- *
- * Returns 0 on success, -1 on failure.
+ * Fully destroys an enclave
+ * Deallocates EID, clears epm, etc
+ * Fails only if the enclave isn't running.
  */
-unsigned long create_enclave(unsigned long epm_base, unsigned long epm_size,
-			     unsigned long utm_base, unsigned long utm_size,
-			     unsigned long host_utm_pa,
-			     unsigned long runtime_entry,
-			     unsigned long user_entry,
-			     unsigned int *eid_out)
+unsigned long destroy_enclave(enclave_id eid)
 {
-	unsigned int eid;
-	struct enclave *enc;
+  int destroyable;
 
-	if (alloc_enclave_eid(&eid) != 0) {
-		sbi_printf("[SM] create_enclave(): no free enclave slot\n");
-		return -1;
-	}
+  spin_lock(&encl_lock);
+  destroyable = (ENCLAVE_EXISTS(eid)
+                 && enclaves[eid].state <= STOPPED);
+  /* update the enclave state first so that
+   * no SM can run the enclave any longer */
+  if(destroyable)
+    enclaves[eid].state = DESTROYING;
+  spin_unlock(&encl_lock);
 
-	reset_enclave_metadata(eid);
-	enc = &enclaves[eid];
+  if(!destroyable)
+    return SBI_ERR_SM_ENCLAVE_NOT_DESTROYABLE;
 
-	/* Allocate G-stage page table from Zion pt_pool */
-	reset_enclave_pt_pool(&g_mem_pool, eid);
-	unsigned long pgd = (unsigned long)get_enclave_root_pt(&g_mem_pool, eid);
-	if (!pgd) {
-		sbi_printf("[SM] create_enclave(): failed to alloc page table\n");
-		free_enclave_eid(eid);
-		return -1;
-	}
 
-	/* Build hgatp */
-	unsigned long hgatp = GSTAGE_MODE;
-	hgatp |= ((unsigned long)eid << HGATP_VMID_SHIFT) & HGATP_VMID_MASK;
-	hgatp |= (pgd >> PAGE_SHIFT) & HGATP_PPN;
+  // 0. Let the platform specifics do cleanup/modifications
+  platform_destroy_enclave(&enclaves[eid]);
 
-	enc->hgatp = hgatp;
-	enc->pgd = pgd;
 
-	/* Save memory layout */
-	enc->mem_info.epm_base = epm_base;
-	enc->mem_info.epm_size = epm_size;
-	enc->mem_info.utm_base = utm_base;
-	enc->mem_info.utm_size = utm_size;
-	enc->mem_info.host_utm_pa = host_utm_pa;
-	enc->mem_info.runtime_entry = runtime_entry;
-	enc->mem_info.user_entry = user_entry;
+  // 1. clear all the data in the enclave pages
+  // requires no lock (single runner)
+  int i;
+  void* base;
+  size_t size;
+  region_id rid;
+  for(i = 0; i < ENCLAVE_REGIONS_MAX; i++){
+    if(enclaves[eid].regions[i].type == REGION_INVALID ||
+       enclaves[eid].regions[i].type == REGION_UTM)
+      continue;
+    //1.a Clear all pages
+    rid = enclaves[eid].regions[i].pmp_rid;
+    base = (void*) pmp_region_get_addr(rid);
+    size = (size_t) pmp_region_get_size(rid);
+    sbi_memset((void*) base, 0, size);
 
-	enc->owner_rtid = (unsigned int)-1;
+    //1.b free pmp region
+    pmp_unset_global(rid);
+    pmp_region_free_atomic(rid);
+  }
 
-	/* Map EPM: allocate physical blocks and build G-stage mappings */
-	if (enclave_map_epm(eid) != 0) {
-		sbi_printf("[SM] create_enclave(): EPM mapping failed\n");
-		reset_enclave_pt_pool(&g_mem_pool, eid);
-		free_enclave_eid(eid);
-		return -1;
-	}
+  // 2. free pmp region for UTM
+  rid = get_enclave_region_index(eid, REGION_UTM);
+  if(rid != -1)
+    pmp_region_free_atomic(enclaves[eid].regions[rid].pmp_rid);
 
-	/* Map UTM: host PA → enclave GPA in G-stage */
-	if (host_utm_pa && utm_size) {
-		if (enclave_map_utm(eid) != 0) {
-			sbi_printf("[SM] create_enclave(): UTM mapping failed\n");
-			free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
-			reset_enclave_pt_pool(&g_mem_pool, eid);
-			free_enclave_eid(eid);
-			return -1;
-		}
-	}
+  enclaves[eid].encl_satp = 0;
+  enclaves[eid].n_thread = 0;
+  enclaves[eid].params = (struct runtime_params_t) {0};
+  for(i=0; i < ENCLAVE_REGIONS_MAX; i++){
+    enclaves[eid].regions[i].type = REGION_INVALID;
+  }
 
-	*eid_out = eid;
+  // 3. release eid
+  encl_free_eid(eid);
 
-	zion_printf("[SM] create_enclave(): eid=%u, hgatp=%lx, pgd=%lx\n",
-		    eid, hgatp, pgd);
-	zion_printf("[SM] create_enclave(): epm=0x%lx+0x%lx, utm=0x%lx+0x%lx\n",
-		    epm_base, epm_size, utm_base, utm_size);
-
-	return 0;
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-/*
- * destroy_enclave - Release all resources of an enclave.
- */
-unsigned long destroy_enclave(unsigned int eid)
+unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 {
-	struct enclave *enc;
+  int runable;
 
-	if (!enclave_eid_allocated(eid))
-		return -1;
+  spin_lock(&encl_lock);
+  runable = (ENCLAVE_EXISTS(eid)
+            && enclaves[eid].state == FRESH);
+  if(runable) {
+    enclaves[eid].state = RUNNING;
+    enclaves[eid].n_thread++;
+  }
+  spin_unlock(&encl_lock);
 
-	enc = &enclaves[eid];
+  if(!runable) {
+    return SBI_ERR_SM_ENCLAVE_NOT_FRESH;
+  }
 
-	/* Free page table pool */
-	reset_enclave_pt_pool(&g_mem_pool, eid);
+  // Enclave is OK to run, context switch to it
+  context_switch_to_enclave(regs, eid, 1);
 
-	/* Free TEE thread */
-	if (enc->tthread) {
-		tee_thread_free(enc->tthread);
-		enc->tthread = NULL;
-	}
-
-	/* Free data blocks */
-	free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
-
-	reset_enclave_metadata(eid);
-	free_enclave_eid(eid);
-
-	zion_printf("[SM] destroy_enclave(): eid=%u destroyed\n", eid);
-
-	return 0;
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-/*
- * enclave_map_epm - Map Enclave Private Memory into G-stage page table.
- *
- * Uses lazy mapping: pages are mapped on first access (page fault).
- * This function pre-maps the EPM region using 2MB huge pages.
- */
-int enclave_map_epm(unsigned int eid)
+unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 {
-	struct enclave *enc;
-	size_t mapped = 0;
+  int exitable;
 
-	if (!enclave_eid_allocated(eid))
-		return -1;
+  spin_lock(&encl_lock);
+  exitable = enclaves[eid].state == RUNNING;
+  if (exitable) {
+    enclaves[eid].n_thread--;
+    if(enclaves[eid].n_thread == 0)
+      enclaves[eid].state = STOPPED;
+  }
+  spin_unlock(&encl_lock);
 
-	enc = &enclaves[eid];
+  if(!exitable)
+    return SBI_ERR_SM_ENCLAVE_NOT_RUNNING;
 
-	if (!enc->mem_info.epm_base || !enc->mem_info.epm_size)
-		return -1;
+  context_switch_to_host(regs, eid, 0);
 
-	while (mapped < enc->mem_info.epm_size) {
-		uint64_t gpa = enc->mem_info.epm_base + mapped;
-		uint64_t block = alloc_data_block(&g_mem_pool.data_pool, eid);
-		if (block == (uint64_t)-1) {
-			sbi_printf("[SM] enclave_map_epm(): out of data blocks\n");
-			return -1;
-		}
-
-		if (map_gpa_to_hpa(&g_mem_pool, eid + CVM_NUM, gpa, block,
-				   BLOCK_SIZE, IS_HUGE_PAGE, false)) {
-			sbi_printf("[SM] enclave_map_epm(): map failed at 0x%lx\n",
-				   gpa);
-			return -1;
-		}
-
-		mapped += BLOCK_SIZE;
-	}
-
-	__sbi_hfence_gvma_all();
-
-	zion_printf("[SM] enclave_map_epm(): eid=%u, mapped 0x%lx bytes\n",
-		    eid, mapped);
-
-	return 0;
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-/*
- * enclave_map_utm - Map Untrusted shared Memory into G-stage page table.
- *
- * UTM is backed by host physical memory (host_utm_pa). We map it into
- * the enclave's G-stage at utm_base GPA so both host and enclave can
- * access it. Uses 2MB huge pages.
- */
-int enclave_map_utm(unsigned int eid)
+unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request, enclave_id eid)
 {
-	struct enclave *enc;
-	size_t mapped = 0;
+  int stoppable;
 
-	if (!enclave_eid_allocated(eid))
-		return -1;
+  spin_lock(&encl_lock);
+  stoppable = enclaves[eid].state == RUNNING;
+  if (stoppable) {
+    enclaves[eid].n_thread--;
+    if(enclaves[eid].n_thread == 0)
+      enclaves[eid].state = STOPPED;
+  }
+  spin_unlock(&encl_lock);
 
-	enc = &enclaves[eid];
+  if(!stoppable)
+    return SBI_ERR_SM_ENCLAVE_NOT_RUNNING;
 
-	if (!enc->mem_info.utm_base || !enc->mem_info.utm_size)
-		return -1;
+  context_switch_to_host(regs, eid, request == STOP_EDGE_CALL_HOST);
 
-	if (!enc->mem_info.host_utm_pa) {
-		sbi_printf("[SM] enclave_map_utm(): no host UTM PA\n");
-		return -1;
-	}
-
-	while (mapped < enc->mem_info.utm_size) {
-		uint64_t gpa = enc->mem_info.utm_base + mapped;
-		uint64_t hpa = enc->mem_info.host_utm_pa + mapped;
-
-		if (map_gpa_to_hpa(&g_mem_pool, eid + CVM_NUM, gpa, hpa,
-				   BLOCK_SIZE, IS_HUGE_PAGE, false)) {
-			sbi_printf("[SM] enclave_map_utm(): map failed at "
-				   "gpa=0x%lx hpa=0x%lx\n", gpa, hpa);
-			return -1;
-		}
-
-		mapped += BLOCK_SIZE;
-	}
-
-	__sbi_hfence_gvma_all();
-
-	zion_printf("[SM] enclave_map_utm(): eid=%u, mapped 0x%lx bytes, "
-		    "host_pa=0x%lx\n",
-		    eid, mapped, enc->mem_info.host_utm_pa);
-
-	return 0;
+  switch(request) {
+    case(STOP_TIMER_INTERRUPT):
+      return SBI_ERR_SM_ENCLAVE_INTERRUPTED;
+    case(STOP_EDGE_CALL_HOST):
+      return SBI_ERR_SM_ENCLAVE_EDGE_CALL_HOST;
+    default:
+      return SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR;
+  }
 }
 
-/*
- * run_enclave - Enter an enclave for the first time (or resume from exit).
- *
- * Sets up the tee_thread CSR/GPR state and performs context switch
- * from REE to ENCLAVE.
- */
-unsigned long run_enclave(struct sbi_trap_regs *regs, unsigned int eid)
+unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 {
-	struct enclave *enc;
-	struct tee_thread *tthread;
-	uintptr_t mstatus;
+  int resumable;
 
-	if (!enclave_eid_allocated(eid)) {
-		sbi_printf("[SM] run_enclave(): invalid eid=%u\n", eid);
-		return -1;
-	}
+  spin_lock(&encl_lock);
+  resumable = (ENCLAVE_EXISTS(eid)
+               && (enclaves[eid].state == RUNNING || enclaves[eid].state == STOPPED)
+               && enclaves[eid].n_thread < MAX_ENCL_THREADS);
 
-	enc = &enclaves[eid];
+  if(!resumable) {
+    spin_unlock(&encl_lock);
+    return SBI_ERR_SM_ENCLAVE_NOT_RESUMABLE;
+  } else {
+    enclaves[eid].n_thread++;
+    enclaves[eid].state = RUNNING;
+  }
+  spin_unlock(&encl_lock);
 
-	/* Allocate tee_thread on first run */
-	if (!enc->tthread) {
-		tthread = tee_thread_alloc();
-		if (!tthread) {
-			sbi_printf("[SM] run_enclave(): no free tee_thread\n");
-			return -1;
-		}
+  // Enclave is OK to resume, context switch to it
+  context_switch_to_enclave(regs, eid, 0);
 
-		enc->tthread = tthread;
-		tthread->master = (void *)enc;
-
-		save_tthread_state(&tthread->state, eid, 0, tthread, ENCLAVE);
-
-		/* Build initial mstatus for VS-mode */
-		mstatus = csr_read(CSR_MSTATUS);
-		mstatus &= ~MSTATUS_MPP;
-		mstatus |= (PRV_S << MSTATUS_MPP_SHIFT);
-		mstatus |= MSTATUS_MPV;  /* Enter virtual mode */
-		mstatus &= ~MSTATUS_FS;
-		mstatus |= (1UL << 14);  /* FS=Dirty for FP */
-		mstatus &= ~MSTATUS_SIE;
-		mstatus &= ~MSTATUS_SPIE;
-
-		/* Initialize CSR state for Eyrie runtime in VS-mode */
-		init_enclave_csrs(&tthread->csrs, mstatus, enc->hgatp);
-
-		/* Set Eyrie runtime entry point as mepc */
-		tthread->csrs.mepc = enc->mem_info.runtime_entry;
-
-		/*
-		 * Set initial arguments for Eyrie eyrie_boot():
-		 *   a0 = dummy (0)
-		 *   a1 = dram_base (EPM base GPA)
-		 *   a2 = dram_size (EPM size)
-		 *   a3 = runtime_paddr (runtime entry = EPM base)
-		 *   a4 = user_paddr (user app entry point)
-		 *   a5 = free_paddr (free memory after user app)
-		 *   a6 = utm_vaddr (UTM GPA)
-		 *   a7 = utm_size
-		 */
-		tthread->gprs.a0 = 0;
-		tthread->gprs.a1 = enc->mem_info.epm_base;
-		tthread->gprs.a2 = enc->mem_info.epm_size;
-		tthread->gprs.a3 = enc->mem_info.runtime_entry;
-		tthread->gprs.a4 = enc->mem_info.user_entry;
-		tthread->gprs.a5 = enc->mem_info.epm_base +
-				   enc->mem_info.epm_size;
-		tthread->gprs.a6 = enc->mem_info.utm_base;
-		tthread->gprs.a7 = enc->mem_info.utm_size;
-
-		enc->inited = true;
-
-		zion_printf("[SM] run_enclave(): eid=%u, first run, "
-			    "runtime_entry=0x%lx, user_entry=0x%lx\n",
-			    eid, enc->mem_info.runtime_entry,
-			    enc->mem_info.user_entry);
-	} else {
-		tthread = enc->tthread;
-
-		zion_printf("[SM] run_enclave(): eid=%u, resume, mepc=0x%lx\n",
-			    eid, tthread->csrs.mepc);
-	}
-
-	/* Context switch: REE -> Enclave */
-	context_switch_to(regs, ree.harts[csr_read(mhartid)].tthread,
-			  tthread, REE_TO_ENCLAVE, enc->exit_cause,
-			  NULL, (struct kvm_vcpu_channel *)&enc->channel);
-
-	return 0;
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-/*
- * exit_enclave - Exit from enclave back to REE.
- *
- * Called when enclave explicitly exits (edge call, error, etc.)
- */
-unsigned long exit_enclave(struct sbi_trap_regs *regs, unsigned int eid,
-			   unsigned int exit_cause)
+unsigned long attest_enclave(uintptr_t report_ptr, uintptr_t data, uintptr_t size, enclave_id eid)
 {
-	struct enclave *enc;
-	struct tee_thread *s_tthread;
+  int attestable;
+  struct report report;
+  int ret;
 
-	if (!enclave_eid_allocated(eid))
-		return -1;
+  if (size > ATTEST_DATA_MAXLEN)
+    return SBI_ERR_SM_ENCLAVE_ILLEGAL_ARGUMENT;
 
-	enc = &enclaves[eid];
-	s_tthread = enc->tthread;
+  spin_lock(&encl_lock);
+  attestable = (ENCLAVE_EXISTS(eid)
+                && (enclaves[eid].state >= FRESH));
 
-	if (!s_tthread) {
-		sbi_printf("[SM] exit_enclave(): eid=%u has no tthread\n", eid);
-		return -1;
-	}
+  if(!attestable) {
+    ret = SBI_ERR_SM_ENCLAVE_NOT_INITIALIZED;
+    goto err_unlock;
+  }
 
-	enc->exit_cause = (tee_quit_cause)exit_cause;
+  /* copy data to be signed */
+  ret = copy_enclave_data(&enclaves[eid], report.enclave.data,
+      data, size);
+  report.enclave.data_len = size;
 
-	context_switch_from(regs, s_tthread,
-			    ree.harts[csr_read(mhartid)].tthread,
-			    REE_FROM_ENCLAVE, enc->exit_cause,
-			    NULL, NULL, NULL, 1);
+  if (ret) {
+    ret = SBI_ERR_SM_ENCLAVE_NOT_ACCESSIBLE;
+    goto err_unlock;
+  }
 
-	return 0;
+  spin_unlock(&encl_lock); // Don't need to wait while signing, which might take some time
+
+  sbi_memcpy(report.dev_public_key, dev_public_key, PUBLIC_KEY_SIZE);
+  sbi_memcpy(report.sm.hash, sm_hash, MDSIZE);
+  sbi_memcpy(report.sm.public_key, sm_public_key, PUBLIC_KEY_SIZE);
+  sbi_memcpy(report.sm.signature, sm_signature, SIGNATURE_SIZE);
+  sbi_memcpy(report.enclave.hash, enclaves[eid].hash, MDSIZE);
+  sm_sign(report.enclave.signature,
+      &report.enclave,
+      sizeof(struct enclave_report)
+      - SIGNATURE_SIZE
+      - ATTEST_DATA_MAXLEN + size);
+
+  spin_lock(&encl_lock);
+
+  /* copy report to the enclave */
+  ret = copy_enclave_report(&enclaves[eid],
+      report_ptr,
+      &report);
+
+  if (ret) {
+    ret = SBI_ERR_SM_ENCLAVE_ILLEGAL_ARGUMENT;
+    goto err_unlock;
+  }
+
+  ret = SBI_ERR_SM_ENCLAVE_SUCCESS;
+
+err_unlock:
+  spin_unlock(&encl_lock);
+  return ret;
 }
 
-/*------------------ SBI entry points ------------------*/
-
-unsigned long sbi_sm_create_enclave(struct sbi_trap_regs *regs,
-				    unsigned long epm_base,
-				    unsigned long epm_size,
-				    unsigned long utm_base,
-				    unsigned long utm_size,
-				    unsigned long host_utm_pa)
+unsigned long get_sealing_key(uintptr_t sealing_key, uintptr_t key_ident,
+                                 size_t key_ident_size, enclave_id eid)
 {
-	unsigned long ret;
-	unsigned int eid = 0;
+  struct sealing_key *key_struct = (struct sealing_key *)sealing_key;
+  int ret;
 
-	(void)regs;
+  /* derive key */
+  ret = sm_derive_sealing_key((unsigned char *)key_struct->key,
+                              (const unsigned char *)key_ident, key_ident_size,
+                              (const unsigned char *)enclaves[eid].hash);
+  if (ret)
+    return SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR;
 
-	ret = create_enclave(epm_base, epm_size, utm_base, utm_size,
-			     host_utm_pa, 0, 0, &eid);
-	if (ret) {
-		sbi_printf("[SBI] sbi_sm_create_enclave() failed: ret=0x%lx\n",
-			   ret);
-		return ret;
-	}
+  /* sign derived key */
+  sm_sign((void *)key_struct->signature, (void *)key_struct->key,
+          SEALING_KEY_SIZE);
 
-	/* Return enclave ID in a0 */
-	return (unsigned long)eid;
-}
-
-unsigned long sbi_sm_destroy_enclave(struct sbi_trap_regs *regs,
-				     unsigned int eid)
-{
-	(void)regs;
-	return destroy_enclave(eid);
-}
-
-unsigned long sbi_sm_run_enclave(struct sbi_trap_regs *regs, unsigned int eid)
-{
-	return run_enclave(regs, eid);
-}
-unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
-				  unsigned long eid,
-				  unsigned long exit_cause)
-{
-	unsigned long ret;
-
-	ret = exit_enclave(regs, eid, exit_cause);
-	if (!ret)
-		regs->mepc += 4; /* Skip ecall instruction */
-	return ret;
-}
-
-unsigned long sbi_sm_set_enclave_entry(struct sbi_trap_regs *regs,
-				       unsigned long eid,
-				       unsigned long runtime_entry,
-				       unsigned long user_entry)
-{
-	struct enclave *enc;
-
-	(void)regs;
-
-	if ((unsigned int)eid >= MAX_ENCLAVES ||
-	    !enclave_eid_allocated((unsigned int)eid))
-		return -1;
-
-	enc = &enclaves[(unsigned int)eid];
-	enc->mem_info.runtime_entry = runtime_entry;
-	enc->mem_info.user_entry = user_entry;
-
-	zion_printf("[SBI] set_enclave_entry: eid=%lu, runtime=0x%lx, "
-		    "user=0x%lx\n",
-		    eid, runtime_entry, user_entry);
-
-	return 0;
+  return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }

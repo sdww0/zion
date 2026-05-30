@@ -148,7 +148,10 @@ void set_inited(unsigned int tid)
 unsigned long reserve_mem(unsigned long base, unsigned long count)
 {
 	unsigned long size = count << PAGE_SHIFT;
+	sbi_printf("[SBI] reserve_mem(): base=0x%lx, count=0x%lx, size=0x%lx\n",
+		   base, count, size);
 	int ret = tee_mem_init((uint8_t *)base, (uint32_t)count);
+	sbi_printf("[SBI] reserve_mem(): tee_mem_init() ret=%d\n", ret);
 	if (ret) {
 		sbi_printf("[SBI] reserve_mem(): tee_mem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
 			   base, count, ret);

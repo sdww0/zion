@@ -88,9 +88,9 @@ static const unsigned long cvm_hedeleg =
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
 	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
 
-/* ENCLAVE - Eyrie runs in VS-mode, same delegation as CVM */
-static const unsigned long enclave_mideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
-static const unsigned long enclave_hideleg = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+/* ENCLAVE - Keystone approach: mideleg=0, all interrupts to M-mode */
+static const unsigned long enclave_mideleg = 0;
+static const unsigned long enclave_hideleg = 0;
 static const unsigned long enclave_medeleg =
 	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
@@ -318,6 +318,10 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_VSTVAL, d_csrs->vstval);
 		csr_write(CSR_VSATP, d_csrs->vsatp);
 	} else if (context_mode == REE_TO_ENCLAVE) {
+		/* Keystone approach: mideleg=0, all interrupts go to M-mode.
+		 * No need to mask mie — the SM catches everything.
+		 */
+
 		/* Enclave uses VS-mode CSR set, same as CVM */
 		LOCAL_SWITCH_CSR(hstatus);
 		LOCAL_SWITCH_CSR(scounteren);
@@ -370,6 +374,8 @@ static inline void switch_from_csrs(struct sbi_trap_regs *regs,
 		s_csrs->hvip	   = csr_read_set(CSR_HVIP, 0);
 		s_csrs->vsatp	   = csr_read_set(CSR_VSATP, 0);
 	} else if (context_mode == REE_FROM_ENCLAVE) {
+		/* Keystone approach: mideleg restored by switch_trap_deleg */
+
 		/* Save enclave VS-mode CSRs, restore REE CSRs */
 		LOCAL_SWITCH_CSR(hstatus);
 		LOCAL_SWITCH_CSR(scounteren);
@@ -403,10 +409,14 @@ static inline void switch_trap_deleg(struct zion_state *state)
 		csr_write(CSR_MEDELEG, cvm_medeleg);
 		csr_write(CSR_HEDELEG, cvm_hedeleg);
 	} else if (state->mode == ENCLAVE) {
+		sbi_printf("[SM] switch_trap_deleg: ENCLAVE, medeleg before=0x%lx\n",
+			   csr_read(CSR_MEDELEG));
 		csr_write(CSR_MIDELEG, enclave_mideleg);
 		csr_write(CSR_HIDELEG, enclave_hideleg);
 		csr_write(CSR_MEDELEG, enclave_medeleg);
 		csr_write(CSR_HEDELEG, enclave_hedeleg);
+		sbi_printf("[SM] switch_trap_deleg: medeleg after=0x%lx\n",
+			   csr_read(CSR_MEDELEG));
 	}
 }
 

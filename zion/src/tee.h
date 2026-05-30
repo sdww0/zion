@@ -8,7 +8,7 @@
 
 #define SBI_EXT_EXPERIMENTAL_zion 0x08424b45
 
-// common
+/* ---- Common SBI funcids ---- */
 #define SBI_SM_RESERVE_MEM 1014
 #define SBI_SM_LOAD_PAGE 1020
 #define SBI_SM_REGISTER_PT 1021
@@ -19,7 +19,7 @@
 #define SBI_SM_CYCLE_END 1028
 #define SBI_SM_CLEAN_SEC_MEM 1029
 
-// ree
+/* ---- CVM (Confidential VM) SBI funcids ---- */
 #define SBI_SM_SET_CVM_MEM_INFO 1018
 #define SBI_SM_CREATE_CVM 1015
 #define SBI_SM_INIT_CVM_VCPU 1012
@@ -27,26 +27,49 @@
 #define SBI_SM_EXIT_CVM 1022
 #define SBI_SM_DESTROY_CVM 1023
 
-// tee
+/* ---- TEE shared memory SBI funcids ---- */
 #define SBI_SM_REGISTER_SHARED_MEM_WITH_REE 1030
 #define SBI_SM_FREE_SHARED_MEM_WITH_REE 1031
 #define SBI_SM_SHARE_MEM_TO 1032
 #define SBI_SM_SHARE_MEM_FROM 1033
 
-// enclave (Keystone compatible)
-#define SBI_SM_CREATE_ENCLAVE      2001
-#define SBI_SM_DESTROY_ENCLAVE     2002
-#define SBI_SM_RUN_ENCLAVE         2003
-#define SBI_SM_EXIT_ENCLAVE        2004
-#define SBI_SM_COPY_FROM_ENCLAVE   2005
-#define SBI_SM_COPY_TO_ENCLAVE     2006
-#define SBI_SM_MEMORY_RECLAIM      2007
-#define SBI_SM_SET_ENCLAVE_ENTRY   2008
+/*
+ * ---- Keystone Enclave SBI funcids ----
+ *
+ * These are the standard Keystone function IDs (from sm_call.h).
+ * Range 2000-2999: called by host (S-mode)
+ * Range 3000-3999: called by enclave (S-mode)
+ */
+#define SBI_SM_CREATE_ENCLAVE    2001
+#define SBI_SM_DESTROY_ENCLAVE   2002
+#define SBI_SM_RUN_ENCLAVE       2003
+#define SBI_SM_RESUME_ENCLAVE    2005
+#define FID_RANGE_HOST           2999
 
-#define FID_RANGE_HOST 2999
-#define SBI_SM_RANDOM 3001
+#define SBI_SM_RANDOM            3001
+#define SBI_SM_ATTEST_ENCLAVE    3002
+#define SBI_SM_GET_SEALING_KEY   3003
+#define SBI_SM_STOP_ENCLAVE      3004
+#define SBI_SM_EXIT_ENCLAVE      3006
+#define FID_RANGE_ENCLAVE        3999
 
-#define SBI_SM_GET_SEALING_KEY 3003
+/*
+ * ---- Old Zion enclave funcids (renamed to avoid conflict) ----
+ * These were the original Zion enclave funcids before Keystone port.
+ * They are kept for reference but no longer used in the dispatch.
+ */
+#define SBI_SM_ZION_EXIT_ENCLAVE_OLD   2004
+#define SBI_SM_ZION_COPY_FROM_ENCLAVE  2005  /* conflicts with RESUME */
+#define SBI_SM_ZION_COPY_TO_ENCLAVE    2006
+#define SBI_SM_ZION_MEMORY_RECLAIM     2007
+#define SBI_SM_ZION_SET_ENCLAVE_ENTRY  2008
+
+/* Keystone stop reasons */
+#define STOP_TIMER_INTERRUPT  0
+#define STOP_EDGE_CALL_HOST   1
+#define STOP_EXIT_ENCLAVE     2
+
+/* ---- Structs ---- */
 
 struct sbi_load_page {
 	unsigned long stash;
@@ -175,6 +198,7 @@ void set_inited(unsigned int tid);
 int teem_init(uintptr_t start, unsigned long size);
 void tee_metadata_init(void);
 
+/* CVM SBI wrappers */
 unsigned long sbi_sm_reserve_mem(struct sbi_trap_regs *regs, unsigned long type,
 				 uintptr_t base, unsigned long count);
 unsigned long sbi_sm_create_cvm(struct sbi_trap_regs *regs,
