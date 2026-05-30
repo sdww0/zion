@@ -55,7 +55,7 @@ static int sbi_ecall_keystone_enclave_handler(unsigned long extid, unsigned long
 
   switch (funcid) {
     case SBI_SM_RESERVE_MEM:
-      retval = reserve_mem(regs->a0, regs->a1);
+      retval = reserve_mem(regs->a1, regs->a2);
       break;
     case SBI_SM_CREATE_ENCLAVE:
       retval = sbi_sm_create_enclave(&out->value, regs->a0);
