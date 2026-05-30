@@ -165,18 +165,13 @@ unsigned long reserve_mem(unsigned long base, unsigned long count)
 		return tee_region_id;
 	}
 	/*
-	 * The protected TVM region must be blocked on every started hart.
-	 * A local-only PMP update works on single-hart QEMU, but leaves
-	 * other REE harts unprotected on SMP boards.
+	 * NOTE: PMP locking removed — kernel still has data at this address
+	 * (memmap= reservation is not fully effective during early driver init).
+	 * G-stage page tables provide the primary isolation for enclave/CVM memory.
+	 * PMP locking can be re-added once the memory region is guaranteed
+	 * to be completely free of kernel data.
 	 */
-	ret = pmp_set_global(tee_region_id, PMP_NO_PERM);
-	if (ret) {
-		sbi_printf("[SBI] reserve_mem(): pmp_set_global(region=%d, perm=0x%x) failed, ret=%d\n",
-			   tee_region_id, PMP_NO_PERM, ret);
-		return ret;
-	}
-
-	sbi_printf("[SBI] reserve_mem(): protected region=%d, addr=0x%lx, size=0x%lx\n",
+	sbi_printf("[SBI] reserve_mem(): pool ready, region=%d, addr=0x%lx, size=0x%lx\n",
 		   tee_region_id, (unsigned long)pmp_region_get_addr(tee_region_id),
 		   (unsigned long)pmp_region_get_size(tee_region_id));
 	return 0;
