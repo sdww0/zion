@@ -32,6 +32,7 @@
 #include "sm-sbi.h"
 #include "sm.h"
 #include "cpu.h"
+#include "tee.h"
 
 static int sbi_ecall_keystone_enclave_handler(unsigned long extid, unsigned long funcid,
                      struct sbi_trap_regs *regs,
@@ -39,7 +40,8 @@ static int sbi_ecall_keystone_enclave_handler(unsigned long extid, unsigned long
 {
   uintptr_t retval;
 
-  if (funcid <= FID_RANGE_DEPRECATED) { return SBI_ERR_SM_DEPRECATED; }
+  if (funcid <= FID_RANGE_DEPRECATED && funcid != SBI_SM_RESERVE_MEM)
+    { return SBI_ERR_SM_DEPRECATED; }
   else if (funcid <= FID_RANGE_HOST)
   {
     if (cpu_is_enclave_context())
@@ -52,6 +54,9 @@ static int sbi_ecall_keystone_enclave_handler(unsigned long extid, unsigned long
   }
 
   switch (funcid) {
+    case SBI_SM_RESERVE_MEM:
+      retval = reserve_mem(regs->a0, regs->a1);
+      break;
     case SBI_SM_CREATE_ENCLAVE:
       retval = sbi_sm_create_enclave(&out->value, regs->a0);
       break;

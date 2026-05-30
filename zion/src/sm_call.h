@@ -10,6 +10,8 @@
 
 /* 0-1999 are not used (deprecated) */
 #define FID_RANGE_DEPRECATED      1999
+/* 1000-1999 are CVM/host system calls */
+#define SBI_SM_RESERVE_MEM      1014
 /* 2000-2999 are called by host */
 #define SBI_SM_CREATE_ENCLAVE    2001
 #define SBI_SM_DESTROY_ENCLAVE   2002
