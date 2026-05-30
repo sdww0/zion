@@ -3,6 +3,7 @@
 // All Rights Reserved. See LICENSE for license details.
 //------------------------------------------------------------------------------
 #include "enclave.h"
+#include "zion.h"
 #include "mprv.h"
 #include "pmp.h"
 #include "page.h"
@@ -47,6 +48,25 @@ static inline void context_switch_to_enclave(struct sbi_trap_regs* regs,
   swap_prev_mepc(&enclaves[eid].threads[0], regs, regs->mepc);
   swap_prev_mstatus(&enclaves[eid].threads[0], regs, regs->mstatus);
 
+  /* Enter VS-mode: save host hstatus, set SPV=1 */
+  enclaves[eid].threads[0].prev_csrs.hstatus = csr_read(CSR_HSTATUS);
+  enclaves[eid].threads[0].prev_csrs.medeleg = csr_read(CSR_MEDELEG);
+  enclaves[eid].threads[0].prev_csrs.hedeleg = csr_read(CSR_HEDELEG);
+  enclaves[eid].threads[0].prev_csrs.henvcfg = csr_read(CSR_HENVCFG);
+  enclaves[eid].threads[0].prev_csrs.menvcfg = csr_read(CSR_MENVCFG);
+  enclaves[eid].threads[0].prev_csrs.hcounteren = csr_read(CSR_HCOUNTEREN);
+  // hstatus: SPV=1 (enter VS-mode), SPVP=S (VS-mode supervisor)
+  csr_write(CSR_HSTATUS, HSTATUS_SPV | HSTATUS_SPVP);
+  // hcounteren: enable VS-mode access to cycle(0), time(1), instret(2)
+  csr_write(CSR_HCOUNTEREN, enclaves[eid].threads[0].prev_csrs.hcounteren | 0x7);
+  sm_debug("[SM] hcounteren: saved=%lx written=%lx readback=%lx\n",
+             enclaves[eid].threads[0].prev_csrs.hcounteren,
+             enclaves[eid].threads[0].prev_csrs.hcounteren | 0x7,
+             csr_read(CSR_HCOUNTEREN));
+
+  sm_debug("[SM] context_switch_to_enclave: eid=%d, hstatus=%lx, mstatus=%lx, mepc=%lx\n",
+             eid, enclaves[eid].threads[0].prev_csrs.hstatus, regs->mstatus, regs->mepc);
+
   /* On first run (load_parameters=1), MPP is set to S-mode inside the block below.
    * On resume, swap_prev_mstatus already restores the enclave's saved mstatus
    * (with MPP=U for eapp). Do NOT override MPP here — the eapp runs in U-mode
@@ -57,18 +77,43 @@ static inline void context_switch_to_enclave(struct sbi_trap_regs* regs,
   uintptr_t interrupts = 0;
   csr_write(mideleg, interrupts);
 
-  /* Set medeleg for enclave: delegate page faults + ecall to S-mode
-   * so the loader's csrw satp fault goes to stvec (runtime _start). */
-  static const unsigned long enclave_medeleg_local =
+  /* In VS-mode (H extension), exception delegation chain is:
+   * VS-mode trap → hedeleg? → VS-mode(vstvec)
+   *              ↛ → medeleg? → HS-mode(stvec)
+   *              ↛ → 默认     → M-mode(mtvec)
+   *
+   * Use hedeleg (not medeleg) to delegate page faults + ecall to VS-mode,
+   * so Eyrie runtime's vstvec handler receives them. If we used medeleg,
+   * traps would go to HS-mode where there's no handler (stvec=0 → crash).
+   * Keep medeleg=0 so non-delegated traps (timer, etc.) go to M-mode. */
+  static const unsigned long enclave_hedeleg_local =
     (1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
     (1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
     (1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
-  csr_write(CSR_MEDELEG, enclave_medeleg_local);
+  csr_write(CSR_HEDELEG, enclave_hedeleg_local);
+  csr_write(CSR_MEDELEG, 0);
 
   if(load_parameters) {
     // passing parameters for a first run
     regs->mepc = (uintptr_t) enclaves[eid].params.dram_base - 4; // regs->mepc will be +4 before sbi_ecall_handler return
-    regs->mstatus = (1 << MSTATUS_MPP_SHIFT);
+    // MPP=S, MPV=1 → enter VS-mode
+    regs->mstatus = (1 << MSTATUS_MPP_SHIFT) | MSTATUS_MPV;
+
+    // Initialize VS-mode CSRs for first run
+    // vsstatus: SUM=1 allows VS-mode supervisor to access VU memory
+    csr_write(CSR_VSSTATUS, SSTATUS_SUM);
+    // vstvec: keep 0, exceptions will trap to M-mode (mideleg=0)
+    // Other VS-mode CSRs: keep 0
+    csr_write(CSR_VSIE, 0);
+    csr_write(CSR_VSIP, 0);
+    csr_write(CSR_VSSCRATCH, 0);
+    csr_write(CSR_VSEPC, 0);
+    csr_write(CSR_VSCAUSE, 0);
+    csr_write(CSR_VSTVAL, 0);
+    csr_write(CSR_VSATP, 0);
+
+    sm_debug("[SM] run_enclave: first run, mepc=%lx, mstatus=%lx (MPP=S, MPV=1)\n",
+               regs->mepc, regs->mstatus);
     // $a1: (PA) DRAM base,
     regs->a1 = (uintptr_t) enclaves[eid].params.dram_base;
     // $a2: DRAM size,
@@ -124,6 +169,19 @@ static inline void context_switch_to_host(struct sbi_trap_regs *regs,
   swap_prev_state(&enclaves[eid].threads[0], regs, return_on_resume);
   swap_prev_mepc(&enclaves[eid].threads[0], regs, regs->mepc);
   swap_prev_mstatus(&enclaves[eid].threads[0], regs, regs->mstatus);
+
+  /* Restore host hstatus */
+  csr_write(CSR_HSTATUS, enclaves[eid].threads[0].prev_csrs.hstatus);
+
+  /* Restore host medeleg/hedeleg */
+  csr_write(CSR_HEDELEG, enclaves[eid].threads[0].prev_csrs.hedeleg);
+  csr_write(CSR_MEDELEG, enclaves[eid].threads[0].prev_csrs.medeleg);
+  csr_write(CSR_HENVCFG, enclaves[eid].threads[0].prev_csrs.henvcfg);
+  csr_write(CSR_MENVCFG, enclaves[eid].threads[0].prev_csrs.menvcfg);
+  csr_write(CSR_HCOUNTEREN, enclaves[eid].threads[0].prev_csrs.hcounteren);
+
+  sm_debug("[SM] context_switch_to_host: eid=%d, hstatus=%lx\n",
+             eid, enclaves[eid].threads[0].prev_csrs.hstatus);
 
   switch_vector_host();
 
@@ -436,6 +494,9 @@ unsigned long create_enclave(unsigned long *eidptr, struct keystone_sbi_create_t
   /* EIDs are unsigned int in size, copy via simple copy */
   *eidptr = eid;
 
+  sm_debug("[SM] create_enclave: eid=%d, epm=%lx, size=%lx, utm=%lx, runtime=%lx\n",
+             eid, base, size, utbase, create_args.runtime_paddr);
+
   spin_unlock(&encl_lock);
   return SBI_ERR_SM_ENCLAVE_SUCCESS;
 
@@ -463,6 +524,8 @@ error:
 unsigned long destroy_enclave(enclave_id eid)
 {
   int destroyable;
+
+  sm_debug("[SM] destroy_enclave: eid=%d\n", eid);
 
   spin_lock(&encl_lock);
   destroyable = (ENCLAVE_EXISTS(eid)
@@ -524,6 +587,8 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 {
   int runable;
 
+  sm_debug("[SM] run_enclave: eid=%d\n", eid);
+
   spin_lock(&encl_lock);
   runable = (ENCLAVE_EXISTS(eid)
             && enclaves[eid].state == FRESH);
@@ -547,6 +612,8 @@ unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 {
   int exitable;
 
+  sm_debug("[SM] exit_enclave: eid=%d\n", eid);
+
   spin_lock(&encl_lock);
   exitable = enclaves[eid].state == RUNNING;
   if (exitable) {
@@ -567,6 +634,8 @@ unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request, enclave_id eid)
 {
   int stoppable;
+
+  sm_debug("[SM] stop_enclave: eid=%d, request=%ld\n", eid, request);
 
   spin_lock(&encl_lock);
   stoppable = enclaves[eid].state == RUNNING;
@@ -595,6 +664,8 @@ unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request, enclave
 unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 {
   int resumable;
+
+  sm_debug("[SM] resume_enclave: eid=%d\n", eid);
 
   spin_lock(&encl_lock);
   resumable = (ENCLAVE_EXISTS(eid)

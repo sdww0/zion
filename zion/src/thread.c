@@ -3,6 +3,7 @@
 // All Rights Reserved. See LICENSE for license details.
 //------------------------------------------------------------------------------
 #include <sbi/riscv_asm.h>
+#include "zion.h"
 #include <sbi/sbi_console.h>
 #include "thread.h"
 
@@ -18,7 +19,7 @@ void swap_prev_mstatus(struct thread_state* thread, struct sbi_trap_regs* regs, 
   //Time interrupts can occur in either user mode or supervisor mode
   uintptr_t mstatus_mask = MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP |
                             MSTATUS_MPP | MSTATUS_FS | MSTATUS_SUM |
-                            MSTATUS_MXR;
+                            MSTATUS_MXR | MSTATUS_MPV;
 
   uintptr_t tmp = thread->prev_mstatus;
   thread->prev_mstatus = (current_mstatus & ~mstatus_mask) | (current_mstatus & mstatus_mask);
@@ -100,6 +101,8 @@ void swap_prev_mepc(struct thread_state* thread, struct sbi_trap_regs* regs, uin
   uintptr_t tmp = thread->prev_mepc;
   thread->prev_mepc = current_mepc;
   regs->mepc = tmp;
+
+  sm_debug("[SM] swap_prev_mepc: saved=%lx, restored=%lx\n", current_mepc, tmp);
 }
 
 
@@ -111,7 +114,9 @@ void clean_state(struct thread_state* state){
     prev[i] = 0;
   }
 
-  state->prev_mpp = -1; // 0x800;
+  state->prev_mpp = -1;
+  state->prev_mepc = 0;
+  state->prev_mstatus = 0;
   clean_smode_csrs(state);
 }
 
@@ -133,5 +138,16 @@ void clean_smode_csrs(struct thread_state* state){
   state->prev_csrs.sbadaddr = 0;
   state->prev_csrs.sip = 0;
   state->prev_csrs.satp = 0;
+
+  state->prev_csrs.hstatus = 0;
+  state->prev_csrs.vsstatus = 0;
+  state->prev_csrs.vsie = 0;
+  state->prev_csrs.vstvec = 0;
+  state->prev_csrs.vsscratch = 0;
+  state->prev_csrs.vsepc = 0;
+  state->prev_csrs.vscause = 0;
+  state->prev_csrs.vstval = 0;
+  state->prev_csrs.vsip = 0;
+  state->prev_csrs.vsatp = 0;
 
 }

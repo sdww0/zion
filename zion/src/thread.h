@@ -63,6 +63,14 @@ struct csrs
   /*  Supervisor Protection and Translation */
   uintptr_t satp;     //Page-table base register.
 
+  /* H-extension CSRs */
+  uintptr_t hstatus;  // Hypervisor status register
+  uintptr_t hedeleg;  // Hypervisor exception delegation register
+  uintptr_t medeleg;  // Machine exception delegation register (saved for host restore)
+  uintptr_t henvcfg;  // Hypervisor environment configuration register
+  uintptr_t menvcfg;  // Machine environment configuration register
+  uintptr_t hcounteren; // Hypervisor counter enable register
+
   /* VS-mode CSRs (used when entering enclave in VS-mode via H-extension) */
   uintptr_t vsstatus;
   uintptr_t vsie;

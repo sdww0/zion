@@ -1,4 +1,5 @@
 #include "enclave.h"
+#include "zion.h"
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
 #include <sbi/sbi_console.h>
@@ -88,6 +89,20 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 	ulong mtval = csr_read(CSR_MTVAL), mtval2 = 0, mtinst = 0;
 	struct sbi_trap_info trap;
 
+	sm_debug("[SM] trap_handler_enclave: mcause=%lx, mtval=%lx, mepc=%lx\n",
+		   mcause, mtval, regs->mepc);
+
+	if (regs->mepc == 0) {
+		sbi_printf("[SM] FATAL: mepc=0, hanging. mcause=%lx mtval=%lx henvcfg=%lx hedeleg=%lx\n",
+			   mcause, mtval, csr_read(CSR_HENVCFG), csr_read(CSR_HEDELEG));
+		while(1) { asm volatile("wfi"); }
+	}
+
+	if (mcause == 16) {
+		sm_debug("[SM] virtual instruction fault: henvcfg=%lx, mtinst=%lx\n",
+			   csr_read(CSR_HENVCFG), csr_read(CSR_MTINST));
+	}
+
 	if (misa_extension('H')) {
 		mtval2 = csr_read(CSR_MTVAL2);
 		mtinst = csr_read(CSR_MTINST);
@@ -97,6 +112,7 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 		mcause &= ~(1UL << (__riscv_xlen - 1));
 		switch (mcause) {
 		case IRQ_M_TIMER: {
+      sm_debug("[SM] timer interrupt in enclave\n");
       regs->mepc -= 4;
       sbi_sm_stop_enclave(regs, STOP_TIMER_INTERRUPT);
       regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
@@ -133,8 +149,42 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 	case CAUSE_SUPERVISOR_ECALL:
 	case CAUSE_VIRTUAL_SUPERVISOR_ECALL:
 	case CAUSE_MACHINE_ECALL:
+		sm_debug("[SM] ecall from enclave: cause=%lx, mepc=%lx\n", mcause, regs->mepc);
 		{ struct sbi_trap_context _tc = { .regs = *regs, .trap = {CAUSE_MACHINE_ECALL, 0} }; rc = sbi_ecall_handler(&_tc); *regs = _tc.regs; }
 		msg = "ecall handler failed";
+		break;
+	case CAUSE_VIRTUAL_INST_FAULT:
+		/* VS-mode virtualized instruction fault.
+		 * QEMU doesn't populate mtinst for VIF, so read instruction from memory.
+		 * M-mode direct read: PMP_ALL_PERM is set for enclave regions. */
+		{
+			/* Read instruction directly from mepc (M-mode physical access, PMP allows it) */
+			ulong insn = *(volatile ulong *)regs->mepc;
+
+			/* CSR read: opcode=1110011, funct3=010(CSRRS), rs1=x0 */
+			if ((insn & 0x7f) == 0x73 && ((insn >> 12) & 0x7) == 2 &&
+			    ((insn >> 15) & 0x1f) == 0) {
+				uintptr_t csr = (insn >> 20) & 0xfff;
+				uintptr_t rd = (insn >> 7) & 0x1f;
+				uintptr_t val = 0;
+				if (csr == 0xc01) {
+					val = csr_read(CSR_MCYCLE);
+				} else if (csr == 0xc02) {
+					val = csr_read(CSR_MINSTRET);
+				} else {
+					sm_debug("[SM] unhandled VIF: csr=%lx insn=%lx\n", csr, insn);
+					goto trap_error;
+				}
+				sm_debug("[SM] emulate csrr rd=x%ld csr=%lx val=%lx mepc=%lx\n",
+					   rd, csr, val, regs->mepc);
+				if (rd > 0)
+					((uintptr_t*)regs)[rd] = val;
+				regs->mepc += ((insn & 0x3) == 0x3) ? 4 : 2;
+				return;
+			}
+			sm_debug("[SM] unhandled VIF: insn=%lx mepc=%lx\n", insn, regs->mepc);
+			goto trap_error;
+		}
 		break;
 	default:
 		/* If the trap came from S or U mode, redirect it there */

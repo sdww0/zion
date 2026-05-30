@@ -1,6 +1,8 @@
 #ifndef __ZION_H__
 #define __ZION_H__
 
+#include <sbi/sbi_types.h>
+
 #define MAX_TEE_THREADS 48
 #define MAX_REE_HARTS 8
 #define MAX_CVMS 16
@@ -58,6 +60,18 @@ void zion_enable_counters(void);
 #else
 #define zion_printf(...) \
 	do {                 \
+	} while (0)
+#endif
+
+/* SM debug print: controlled by DEBUG flag in zion.h */
+#ifdef DEBUG
+#define sm_debug(...) \
+	do {              \
+		sbi_printf(__VA_ARGS__); \
+	} while (0)
+#else
+#define sm_debug(...) \
+	do {              \
 	} while (0)
 #endif
 
