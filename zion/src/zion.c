@@ -42,15 +42,3 @@ void zion_init(bool cold_boot)
 		sbi_printf("[SBI] Zion TEE initialized (Keystone SM)\n");
 }
 
-/*
- * Stub for tee_security_check — called by OpenSBI's sbi_trap.c
- * on load/store access faults. Was part of Zion CVM code.
- * No-op for Keystone-only mode.
- */
-void tee_security_check(unsigned long addr, unsigned long cause,
-			unsigned long priv)
-{
-	(void)addr;
-	(void)cause;
-	(void)priv;
-}

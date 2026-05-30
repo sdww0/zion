@@ -7,9 +7,12 @@
  */
 #include "enclave.h"
 #include "pmp.h"
+#include "tee-mem.h"
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_console.h>
 #include <sbi/riscv_asm.h>
+#include <sbi/riscv_encoding.h>
+#include <sbi/sbi_hfence.h>
 
 unsigned long platform_init_global_once(void)
 {
@@ -24,13 +27,88 @@ unsigned long platform_init_global(void)
 void platform_init_enclave(struct enclave *enclave) {}
 void platform_destroy_enclave(struct enclave *enclave) {}
 
+/* Saved host hgatp — restored when returning from enclave */
+static unsigned long host_hgatp;
+
 unsigned long platform_create_enclave(struct enclave *enclave)
 {
+	/*
+	 * Build G-stage page tables for the enclave using tee-mem.
+	 *
+	 * Enclave regions: [0] = EPM, [1] = UTM (set by keystone create_enclave).
+	 * We map GPA=HPA (identity) so the enclave runtime sees correct addresses.
+	 */
+	uintptr_t epm_base = get_enclave_region_base(enclave->eid, 0);
+	size_t    epm_size = get_enclave_region_size(enclave->eid, 0);
+	uintptr_t utm_base = get_enclave_region_base(enclave->eid, 1);
+	size_t    utm_size = get_enclave_region_size(enclave->eid, 1);
+
+	if (!epm_base || !epm_size) {
+		sbi_printf("[SM] platform_create_enclave: eid=%d no EPM\n",
+			   enclave->eid);
+		return SBI_ERR_SM_ENCLAVE_PMP_FAILURE;
+	}
+
+	/* Store memory info for demand paging */
+	enclave->mem_info.epm_base = epm_base;
+	enclave->mem_info.epm_size = epm_size;
+	enclave->mem_info.utm_base = utm_base;
+	enclave->mem_info.utm_size = utm_size;
+
+	/* Reset the page table sub-pool for this enclave */
+	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)enclave->eid);
+
+	/* Map EPM: GPA=epm_base → HPA=epm_base (identity) */
+	int enc_cvm_id = CVM_NUM + enclave->eid;
+	int ret = map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
+				 epm_base, epm_base, epm_size, false, false);
+	if (ret) {
+		sbi_printf("[SM] platform_create_enclave: eid=%d EPM map failed\n",
+			   enclave->eid);
+		return SBI_ERR_SM_ENCLAVE_PMP_FAILURE;
+	}
+
+	/* Map UTM if present */
+	if (utm_base && utm_size) {
+		ret = map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
+				     utm_base, utm_base, utm_size, false, false);
+		if (ret) {
+			sbi_printf("[SM] platform_create_enclave: eid=%d UTM map failed\n",
+				   enclave->eid);
+			return SBI_ERR_SM_ENCLAVE_PMP_FAILURE;
+		}
+	}
+
+	/* Compute hgatp value */
+	void *root_pt = get_enclave_root_pt(&g_mem_pool, (uint32_t)enclave->eid);
+	if (!root_pt) {
+		sbi_printf("[SM] platform_create_enclave: eid=%d no root PT\n",
+			   enclave->eid);
+		return SBI_ERR_SM_ENCLAVE_PMP_FAILURE;
+	}
+	enclave->hgatp = ((unsigned long)root_pt >> PAGE_SHIFT) |
+			 (HGATP_MODE_SV39X4 << HGATP_MODE_SHIFT);
+
+	sbi_printf("[SM] platform_create_enclave: eid=%d G-stage ready, hgatp=0x%lx\n",
+		   enclave->eid, enclave->hgatp);
+
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-void platform_switch_to_enclave(struct enclave *enclave) {}
-void platform_switch_from_enclave(struct enclave *enclave) {}
+void platform_switch_to_enclave(struct enclave *enclave)
+{
+	/* Save host hgatp, load enclave's G-stage page table */
+	host_hgatp = csr_read(CSR_HGATP);
+	csr_write(CSR_HGATP, enclave->hgatp);
+	__sbi_hfence_gvma_all();
+}
+
+void platform_switch_from_enclave(struct enclave *enclave)
+{
+	/* Restore host hgatp and flush TLB */
+	csr_write(CSR_HGATP, host_hgatp);
+	__sbi_hfence_gvma_all();
+}
 
 uint64_t platform_random(void)
 {
