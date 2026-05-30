@@ -180,23 +180,19 @@ unsigned long create_enclave(unsigned long *eidptr,
 			     struct keystone_sbi_create_t create_args)
 {
 	/*
-	 * Memory model:
-	 *   EPM: allocated from secure pool, GPA 0-based, non-identity G-stage
-	 *   UTM: host PA = GPA (identity mapped, shared memory)
+	 * Compatible with Keystone SDK/driver interface:
+	 *   epm_region.paddr = EPM PA (driver-allocated, binary already loaded)
+	 *   epm_region.size  = EPM size
+	 *   utm_region.paddr = UTM PA (driver-allocated)
+	 *   utm_region.size  = UTM size
+	 *   runtime_paddr    = Eyrie runtime offset within EPM
 	 *
-	 * create_args field semantics:
-	 *   epm_region.paddr  = REE VA of enclave binary (copy source)
-	 *   epm_region.size   = EPM size
-	 *   utm_region.paddr  = host UTM PA (= enclave UTM GPA, identity)
-	 *   utm_region.size   = UTM size
-	 *   runtime_paddr     = Eyrie runtime offset within EPM
-	 *   user_paddr        = user binary offset within EPM
-	 *   free_paddr        = free region offset within EPM
-	 *   free_requested    = free region size
+	 * SM adapts: copies EPM content into secure pool, uses G-stage
+	 * to redirect enclave GPA → pool PA. Driver/SDK unchanged.
 	 */
-	uintptr_t ree_src = create_args.epm_region.paddr;
+	uintptr_t epm_pa  = create_args.epm_region.paddr; /* EPM GPA = REE PA */
 	size_t epm_size   = create_args.epm_region.size;
-	uintptr_t utm_pa  = create_args.utm_region.paddr; /* host PA = enclave GPA */
+	uintptr_t utm_pa  = create_args.utm_region.paddr;
 	size_t utm_size   = create_args.utm_region.size;
 	enclave_id eid;
 	unsigned long ret;
@@ -209,7 +205,7 @@ unsigned long create_enclave(unsigned long *eidptr,
 	if (ret != SBI_ERR_SM_ENCLAVE_SUCCESS)
 		return ret;
 
-	/* ---- Allocate EPM from secure memory pool ---- */
+	/* ---- Allocate EPM blocks from secure memory pool ---- */
 	int n_blocks = (epm_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
 	uint64_t epm_blocks[16]; /* max 32MB (16 * 2MB) */
 	if (n_blocks > 16) {
@@ -226,31 +222,42 @@ unsigned long create_enclave(unsigned long *eidptr,
 			goto free_blocks;
 		}
 		epm_blocks[i] = pa;
-		sbi_printf("[SM] create_enclave: eid=%d block[%d] pa=0x%lx\n",
-			   eid, i, pa);
+	}
+
+	/* ---- Copy EPM content from driver-allocated PA → secure pool ---- */
+	for (int i = 0; i < n_blocks; i++) {
+		size_t chunk = (i == n_blocks - 1) ?
+			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
+		int err = copy_to_sm((void *)epm_blocks[i],
+				     epm_pa + i * BLOCK_SIZE, chunk);
+		if (err) {
+			sbi_printf("[SM] create_enclave: eid=%d copy block %d failed\n",
+				   eid, i);
+			goto free_blocks;
+		}
 	}
 
 	/* ---- Build G-stage page table ---- */
 	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
 	int enc_cvm_id = CVM_NUM + eid;
 
-	/* EPM: GPA 0-based → secure pool PA (non-identity) */
+	/*
+	 * EPM: map original EPM GPA → secure pool PA (non-identity).
+	 * Enclave sees its memory at the same GPA the SDK/driver used,
+	 * but G-stage transparently redirects to the secure pool.
+	 */
 	for (int i = 0; i < n_blocks; i++) {
-		uint64_t gpa = (uint64_t)i * BLOCK_SIZE;
+		uint64_t gpa = epm_pa + (uint64_t)i * BLOCK_SIZE;
 		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
 				   gpa, epm_blocks[i], BLOCK_SIZE, true, false))
 			goto free_blocks;
-		sbi_printf("[SM] create_enclave: eid=%d G-stage gpa=0x%lx → hpa=0x%lx\n",
-			   eid, gpa, epm_blocks[i]);
 	}
 
-	/* UTM: identity mapping (GPA = host PA) */
+	/* UTM: identity mapping (host needs ongoing access) */
 	if (utm_pa && utm_size) {
 		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
 				   utm_pa, utm_pa, utm_size, false, false))
 			goto free_blocks;
-		sbi_printf("[SM] create_enclave: eid=%d UTM gpa=hpa=0x%lx size=0x%lx\n",
-			   eid, utm_pa, utm_size);
 	}
 
 	/* Compute hgatp */
@@ -260,33 +267,20 @@ unsigned long create_enclave(unsigned long *eidptr,
 	uint64_t hgatp = ((unsigned long)root_pt >> PAGE_SHIFT) |
 			 (HGATP_MODE_SV39X4 << HGATP_MODE_SHIFT);
 
-	/* ---- Copy enclave content from REE → secure pool ---- */
-	for (int i = 0; i < n_blocks; i++) {
-		size_t chunk = (i == n_blocks - 1) ?
-			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
-		int err = copy_to_sm((void *)epm_blocks[i],
-				     ree_src + i * BLOCK_SIZE, chunk);
-		if (err) {
-			sbi_printf("[SM] create_enclave: eid=%d copy block %d failed\n",
-				   eid, i);
-			goto free_blocks;
-		}
-	}
-
 	/* ---- Fill enclave metadata ---- */
 	enclaves[eid].eid = eid;
 	enclaves[eid].n_thread = 0;
 	enclaves[eid].hgatp = hgatp;
-	enclaves[eid].mem_info.epm_base = 0;
+	enclaves[eid].mem_info.epm_base = epm_pa;
 	enclaves[eid].mem_info.epm_size = epm_size;
 	enclaves[eid].mem_info.utm_base = utm_pa;
 	enclaves[eid].mem_info.utm_size = utm_size;
 	enclaves[eid].active_thread = NULL;
 	enclaves[eid].saved_mepc = 0;
 
-	/* Runtime params — all offsets are within EPM (GPA 0-based) */
+	/* Runtime params — Eyrie uses these as-is (GPA unchanged) */
 	struct runtime_params_t *p = &enclaves[eid].params;
-	p->dram_base = 0;
+	p->dram_base = epm_pa;
 	p->dram_size = epm_size;
 	p->runtime_base = create_args.runtime_paddr;
 	p->user_base = create_args.user_paddr;
@@ -309,8 +303,8 @@ unsigned long create_enclave(unsigned long *eidptr,
 	spin_unlock(&encl_lock);
 
 	*eidptr = eid;
-	sbi_printf("[SM] create_enclave: eid=%d epm_size=0x%lx hgatp=0x%lx\n",
-		   eid, epm_size, hgatp);
+	sbi_printf("[SM] create_enclave: eid=%d epm_gpa=0x%lx size=0x%lx hgatp=0x%lx\n",
+		   eid, epm_pa, epm_size, hgatp);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 
 free_blocks:
