@@ -18,6 +18,7 @@
 #include TARGET_PLATFORM_HEADER
 
 #define ATTEST_DATA_MAXLEN  1024
+struct tee_thread; /* forward declaration for active_thread pointer */
 /* TODO: does not support multithreaded enclave yet */
 #define MAX_ENCL_THREADS 1
 
@@ -88,6 +89,9 @@ struct enclave
   unsigned long hgatp;  // G-stage page table register value
   unsigned long pgd;    // root page table physical address
   struct enclave_mem_info mem_info; // for demand paging in trap handler
+  /* Zion context switch tracking */
+  struct tee_thread *active_thread; // currently allocated tee_thread (NULL when not running)
+  uintptr_t saved_mepc;             // PC where enclave stopped (for resume)
 };
 
 /* attestation reports */

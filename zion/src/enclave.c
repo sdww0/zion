@@ -377,6 +377,7 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
 	setup_enclave_thread(thread, &enclaves[eid], entry, sp, arg0, eid);
 
+	enclaves[eid].active_thread = thread;
 	cpu_enter_enclave_context(eid);
 	sbi_printf("[SM] run_enclave: eid=%d entry=0x%lx sp=0x%lx\n",
 		   eid, entry, sp);
@@ -415,11 +416,17 @@ unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	cpu_exit_enclave_context();
 	platform_switch_from_enclave(&enclaves[eid]);
 
-	/* Restore host context via zion's context switch */
-	struct tee_thread *thread = &tee_threads[0]; /* host thread */
-	context_switch_from(regs, thread, thread,
+	/* Restore host context. src=enclave thread (saves enclave CSR state),
+	 * dst=host thread (loads host CSR state from saved state). */
+	struct tee_thread *encl_thread = enclaves[eid].active_thread;
+	struct tee_thread *host_thread = &tee_threads[0];
+	context_switch_from(regs, encl_thread, host_thread,
 			    REE_FROM_ENCLAVE,
 			    0, NULL, NULL, NULL, 0);
+
+	/* Free the allocated tee_thread */
+	tee_thread_free(encl_thread);
+	enclaves[eid].active_thread = NULL;
 
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
@@ -440,10 +447,16 @@ unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request,
 	cpu_exit_enclave_context();
 	platform_switch_from_enclave(&enclaves[eid]);
 
-	struct tee_thread *thread = &tee_threads[0];
-	context_switch_from(regs, thread, thread,
+	struct tee_thread *encl_thread = enclaves[eid].active_thread;
+	struct tee_thread *host_thread = &tee_threads[0];
+	context_switch_from(regs, encl_thread, host_thread,
 			    REE_FROM_ENCLAVE,
 			    0, NULL, NULL, NULL, 1);
+
+	/* Save enclave PC for resume — regs->mepc was saved by switch_from_csrs
+	 * into encl_thread->csrs.mepc, but we also stash it here for resume. */
+	enclaves[eid].saved_mepc = encl_thread->csrs.mepc;
+	/* Keep active_thread alive — resume will reuse it */
 
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
@@ -459,7 +472,8 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	enclaves[eid].n_thread++;
 	spin_unlock(&encl_lock);
 
-	struct tee_thread *thread = tee_thread_alloc();
+	/* Reuse the tee_thread from the previous run (kept alive by stop) */
+	struct tee_thread *thread = enclaves[eid].active_thread;
 	if (!thread) {
 		spin_lock(&encl_lock);
 		enclaves[eid].n_thread--;
@@ -468,14 +482,17 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 		return SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
 	}
 
-	/* Use saved entry point for resume */
+	/* Restore PC from where the enclave stopped */
+	thread->csrs.mepc = enclaves[eid].saved_mepc;
+
+	/* Re-setup GPRs (sp/a0 consumed by previous run) */
 	struct runtime_params_t *p = &enclaves[eid].params;
-	setup_enclave_thread(thread, &enclaves[eid],
-			     p->runtime_base,
-			     p->free_base + p->free_requested,
-			     p->dram_base, eid);
+	thread->gprs.sp = p->free_base + p->free_requested;
+	thread->gprs.a0 = p->dram_base;
 
 	cpu_enter_enclave_context(eid);
+	sbi_printf("[SM] resume_enclave: eid=%d mepc=0x%lx\n",
+		   eid, thread->csrs.mepc);
 
 	context_switch_to(regs, &tee_threads[0], thread,
 			  REE_TO_ENCLAVE, 0, NULL, NULL);
