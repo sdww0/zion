@@ -332,7 +332,8 @@ unsigned long destroy_enclave(enclave_id eid)
 
 	platform_destroy_enclave(&enclaves[eid]);
 
-	/* Free data blocks from secure memory pool */
+	/* TODO: memset blocks before freeing (tee-mem.c: free_data_blocks_per_tid)
+	 * to prevent data leakage to next enclave allocated same blocks. */
 	free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
 
 	enclaves[eid].hgatp = 0;
@@ -482,9 +483,12 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	/* Restore PC from where the enclave stopped */
 	thread->csrs.mepc = enclaves[eid].saved_mepc;
 
-	/* Re-setup GPRs (sp/a0 consumed by previous run) */
+	/*
+	 * Don't reset sp — Eyrie's stack is active, switch_from_csrs
+	 * already saved stop-time sp into encl_thread->gprs.sp.
+	 * Reset a0 only (Eyrie treats dram_base as a constant).
+	 */
 	struct runtime_params_t *p = &enclaves[eid].params;
-	thread->gprs.sp = p->free_base + p->free_requested;
 	thread->gprs.a0 = p->dram_base;
 
 	cpu_enter_enclave_context(eid);
