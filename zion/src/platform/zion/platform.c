@@ -5,8 +5,8 @@
  * and registers the ecall extension. We just provide platform hooks
  * and sm_copy_key() which fills in the key globals.
  */
-#include "../../enclave.h"
-#include "../../pmp.h"
+#include "enclave.h"
+#include "pmp.h"
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_console.h>
 #include <sbi/riscv_asm.h>
