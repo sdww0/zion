@@ -3,19 +3,33 @@
 #include <sbi/riscv_barrier.h>
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
+#include "enclave.h"
 #include "sm.h"
+#include "pmp.h"
+#include "platform-hook.h"
 
 static int zion_init_done = 0;
+
+/* Defined in sm-sbi-opensbi.c */
+extern struct sbi_ecall_extension ecall_keystone_enclave;
 
 void zion_init(bool cold_boot)
 {
 	if (cold_boot) {
-		sbi_printf("[SBI] Zion TEE (Keystone SM) initializing ... hart [%lx]\n",
+		sbi_printf("[SBI] Zion TEE initializing ... hart [%lx]\n",
 			   csr_read(mhartid));
 
-		/* sm_init() registers the ecall extension, inits PMP,
-		 * copies attestation keys, and inits enclave metadata. */
-		sm_init(cold_boot);
+		/* Register enclave SBI extension */
+		sbi_ecall_register_extension(&ecall_keystone_enclave);
+
+		/* Load attestation keys (platform-specific) */
+		sm_copy_key();
+
+		/* Initialize enclave metadata array */
+		enclave_init_metadata();
+
+		/* Platform one-time init */
+		platform_init_global_once();
 
 		zion_init_done = 1;
 		mb();
@@ -24,6 +38,10 @@ void zion_init(bool cold_boot)
 	/* wait until cold-boot hart finishes */
 	while (!zion_init_done)
 		mb();
+
+	/* All harts: init PMP and platform */
+	pmp_init();
+	platform_init_global();
 
 	/*
 	 * Disable sstc on every hart: clear menvcfg.STCE.
@@ -39,6 +57,12 @@ void zion_init(bool cold_boot)
 	csr_write(CSR_SCOUNTEREN, 0x7);
 
 	if (cold_boot)
-		sbi_printf("[SBI] Zion TEE initialized (Keystone SM)\n");
+		sbi_printf("[SBI] Zion TEE initialized\n");
 }
 
+void zion_enable_counters(void)
+{
+	csr_write(CSR_MCOUNTINHIBIT, 0);
+	csr_write(CSR_MCOUNTEREN, 0x7);
+	csr_write(CSR_SCOUNTEREN, 0x7);
+}
