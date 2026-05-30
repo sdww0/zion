@@ -147,7 +147,8 @@ static void setup_enclave_thread(struct tee_thread *thread,
 {
 	/* CSRs for VS-mode enclave execution */
 	thread->csrs.mepc = entry_point;
-	thread->csrs.mstatus = (MSTATUS_MPP << MSTATUS_MPP_SHIFT) |
+	thread->csrs.mstatus = (PRV_S << MSTATUS_MPP_SHIFT) |
+			       MSTATUS_MPV |   /* enter VS-mode on mret */
 			       MSTATUS_MPIE | MSTATUS_SIE;
 	thread->csrs.hstatus = HSTATUS_SPV | HSTATUS_VSXL;
 	thread->csrs.hcounteren = 0x7; /* enable cycle/time/inst counters */
