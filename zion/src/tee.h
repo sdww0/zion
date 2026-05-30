@@ -229,3 +229,4 @@ unsigned long sbi_sm_cycle_end(void);
 unsigned long sbi_sm_clean_sec_mem(void);
 
 #endif
+extern volatile bool tee_pending_virt;

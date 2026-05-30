@@ -466,6 +466,7 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 		switch_vector_to_tee();
 		pmp_set_keystone(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
+		zion_printf("[SM] context: FINAL mtvec=0x%lx mstatus=0x%lx", csr_read(CSR_MTVEC), csr_read(CSR_MSTATUS));
 	}
 	switch_trap_deleg(&d_tthread->state);
 }

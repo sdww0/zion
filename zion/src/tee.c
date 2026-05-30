@@ -19,6 +19,9 @@ static unsigned long tee_thread_alloc_bitmap;
 
 int tee_region_id = 0;
 
+/* Set by SM before returning from ecall to force VS-mode on next mret */
+volatile bool tee_pending_virt = false;
+
 struct tee_thread *tee_thread_alloc(void)
 {
 	for (size_t i = MAX_REE_HARTS; i < MAX_TEE_THREADS; i++) {
