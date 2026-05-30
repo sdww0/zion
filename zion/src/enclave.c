@@ -150,6 +150,7 @@ static void setup_enclave_thread(struct tee_thread *thread,
 	thread->csrs.mstatus = (PRV_S << MSTATUS_MPP_SHIFT) |
 			       MSTATUS_MPV |   /* enter VS-mode on mret */
 			       MSTATUS_MPIE | MSTATUS_SIE;
+	sbi_printf("[SM] setup_enclave_thread: mstatus=0x%lx\n", thread->csrs.mstatus);
 	thread->csrs.hstatus = HSTATUS_SPV | HSTATUS_VSXL;
 	thread->csrs.hcounteren = 0x7; /* enable cycle/time/inst counters */
 	thread->csrs.hgatp = enc->hgatp;
@@ -375,6 +376,13 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
 	setup_enclave_thread(thread, &enclaves[eid], entry, sp, arg0, eid);
 
+	sbi_printf("[SM] thread CSRs: mstatus=0x%lx mepc=0x%lx hstatus=0x%lx\n",
+		   thread->csrs.mstatus, thread->csrs.mepc, thread->csrs.hstatus);
+	sbi_printf("[SM] thread CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx\n",
+		   thread->csrs.hgatp, thread->csrs.hcounteren, thread->csrs.vsatp);
+	sbi_printf("[SM] thread GPRs: sp=0x%lx a0=0x%lx\n",
+		   thread->gprs.sp, thread->gprs.a0);
+
 	enclaves[eid].active_thread = thread;
 	cpu_enter_enclave_context(eid);
 	sbi_printf("[SM] run_enclave: eid=%d entry=0x%lx sp=0x%lx\n",
@@ -394,6 +402,11 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 			  thread,
 			  REE_TO_ENCLAVE,
 			  0, NULL, NULL);
+
+	sbi_printf("[SM] context_switch_to returned: mstatus=0x%lx mepc=0x%lx\n",
+		   regs->mstatus, regs->mepc);
+	sbi_printf("[SM] regs: hstatus=0x%lx a0=0x%lx sp=0x%lx ra=0x%lx\n",
+		   csr_read(CSR_HSTATUS), regs->a0, regs->sp, regs->ra);
 
 	/* Update host regs for mret — switch_to already did this via regs */
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;

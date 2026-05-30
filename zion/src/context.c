@@ -457,6 +457,12 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == REE_TO_ENCLAVE) {
 		/* Enclave: switch trap vector, lock PMP, flush TLB */
+		zion_printf("[SM] context: REE_TO_ENCLAVE, mstatus after switch=%lx\n",
+			    regs->mstatus);
+		zion_printf("[SM] context: hgatp csr=%lx hstatus csr=%lx\n",
+			    csr_read(CSR_HGATP), csr_read(CSR_HSTATUS));
+		zion_printf("[SM] context: mepc=%lx mcause(prev)=%lx mtvec=%lx\n",
+			    regs->mepc, csr_read(CSR_MCAUSE), csr_read(CSR_MTVEC));
 		switch_vector_to_tee();
 		pmp_set_keystone(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
