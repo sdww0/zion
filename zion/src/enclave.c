@@ -181,19 +181,23 @@ unsigned long create_enclave(unsigned long *eidptr,
 {
 	/*
 	 * Memory model:
-	 *   EPM GPA → allocated from secure memory pool (non-identity G-stage)
-	 *   UTM GPA → host-provided PA (shared memory, G-stage mapped)
+	 *   EPM: allocated from secure pool, GPA 0-based, non-identity G-stage
+	 *   UTM: host PA = GPA (identity mapped, shared memory)
 	 *
-	 * epm_region.paddr = REE source address (where enclave binary lives)
-	 * epm_region.size  = EPM size
-	 * utm_region.paddr = host UTM PA (for shared memory)
-	 * utm_region.size  = UTM size
+	 * create_args field semantics:
+	 *   epm_region.paddr  = REE VA of enclave binary (copy source)
+	 *   epm_region.size   = EPM size
+	 *   utm_region.paddr  = host UTM PA (= enclave UTM GPA, identity)
+	 *   utm_region.size   = UTM size
+	 *   runtime_paddr     = Eyrie runtime offset within EPM
+	 *   user_paddr        = user binary offset within EPM
+	 *   free_paddr        = free region offset within EPM
+	 *   free_requested    = free region size
 	 */
-	uintptr_t ree_src = create_args.epm_region.paddr; /* REE VA of enclave binary */
+	uintptr_t ree_src = create_args.epm_region.paddr;
 	size_t epm_size   = create_args.epm_region.size;
-	uintptr_t utm_gpa = create_args.utm_region.paddr; /* UTM GPA (from driver) */
+	uintptr_t utm_pa  = create_args.utm_region.paddr; /* host PA = enclave GPA */
 	size_t utm_size   = create_args.utm_region.size;
-	uintptr_t host_utm_pa = create_args.runtime_paddr; /* host UTM PA */
 	enclave_id eid;
 	unsigned long ret;
 
@@ -230,9 +234,9 @@ unsigned long create_enclave(unsigned long *eidptr,
 	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
 	int enc_cvm_id = CVM_NUM + eid;
 
-	/* EPM: map GPA (e.g. 0x80000000) → secure pool PA (non-identity) */
+	/* EPM: GPA 0-based → secure pool PA (non-identity) */
 	for (int i = 0; i < n_blocks; i++) {
-		uint64_t gpa = (uint64_t)i * BLOCK_SIZE; /* GPA 0, 2MB, 4MB... */
+		uint64_t gpa = (uint64_t)i * BLOCK_SIZE;
 		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
 				   gpa, epm_blocks[i], BLOCK_SIZE, true, false))
 			goto free_blocks;
@@ -240,13 +244,13 @@ unsigned long create_enclave(unsigned long *eidptr,
 			   eid, gpa, epm_blocks[i]);
 	}
 
-	/* UTM: map UTM GPA → host UTM PA */
-	if (utm_gpa && utm_size && host_utm_pa) {
+	/* UTM: identity mapping (GPA = host PA) */
+	if (utm_pa && utm_size) {
 		if (map_gpa_to_hpa(&g_mem_pool, enc_cvm_id,
-				   utm_gpa, host_utm_pa, utm_size, false, false))
+				   utm_pa, utm_pa, utm_size, false, false))
 			goto free_blocks;
-		sbi_printf("[SM] create_enclave: eid=%d UTM gpa=0x%lx → hpa=0x%lx\n",
-			   eid, utm_gpa, host_utm_pa);
+		sbi_printf("[SM] create_enclave: eid=%d UTM gpa=hpa=0x%lx size=0x%lx\n",
+			   eid, utm_pa, utm_size);
 	}
 
 	/* Compute hgatp */
@@ -260,7 +264,6 @@ unsigned long create_enclave(unsigned long *eidptr,
 	for (int i = 0; i < n_blocks; i++) {
 		size_t chunk = (i == n_blocks - 1) ?
 			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
-		/* MPRV copy: src=REE memory, dst=secure pool PA */
 		int err = copy_to_sm((void *)epm_blocks[i],
 				     ree_src + i * BLOCK_SIZE, chunk);
 		if (err) {
@@ -274,21 +277,21 @@ unsigned long create_enclave(unsigned long *eidptr,
 	enclaves[eid].eid = eid;
 	enclaves[eid].n_thread = 0;
 	enclaves[eid].hgatp = hgatp;
-	enclaves[eid].mem_info.epm_base = 0; /* GPA 0 is start of EPM mapping */
+	enclaves[eid].mem_info.epm_base = 0;
 	enclaves[eid].mem_info.epm_size = epm_size;
-	enclaves[eid].mem_info.utm_base = utm_gpa;
+	enclaves[eid].mem_info.utm_base = utm_pa;
 	enclaves[eid].mem_info.utm_size = utm_size;
 	enclaves[eid].active_thread = NULL;
 	enclaves[eid].saved_mepc = 0;
 
-	/* Runtime params (Eyrie expects these) */
+	/* Runtime params — all offsets are within EPM (GPA 0-based) */
 	struct runtime_params_t *p = &enclaves[eid].params;
-	p->dram_base = 0;          /* EPM starts at GPA 0 */
+	p->dram_base = 0;
 	p->dram_size = epm_size;
-	p->runtime_base = create_args.runtime_paddr; /* offset within EPM */
+	p->runtime_base = create_args.runtime_paddr;
 	p->user_base = create_args.user_paddr;
 	p->free_base = create_args.free_paddr;
-	p->untrusted_base = utm_gpa;
+	p->untrusted_base = utm_pa;
 	p->untrusted_size = utm_size;
 	p->free_requested = create_args.free_requested;
 
@@ -339,7 +342,6 @@ unsigned long destroy_enclave(enclave_id eid)
 	free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
 
 	enclaves[eid].hgatp = 0;
-	enclaves[eid].encl_satp = 0;
 
 	/* Release enclave G-stage PT pool */
 	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
