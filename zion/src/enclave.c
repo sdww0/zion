@@ -403,15 +403,14 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 			  REE_TO_ENCLAVE,
 			  0, NULL, NULL);
 
-	/* Tell OpenSBI trap exit to enter VS-mode on mret */
-	tee_pending_virt = true;
-	sbi_printf("[SM] context_switch_to returned: mstatus=0x%lx mepc=0x%lx\n",
-		   regs->mstatus, regs->mepc);
-	sbi_printf("[SM] regs: hstatus=0x%lx a0=0x%lx sp=0x%lx ra=0x%lx\n",
-		   csr_read(CSR_HSTATUS), regs->a0, regs->sp, regs->ra);
+	sbi_printf("[SM] entering enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
+		   regs->mepc, regs->mstatus);
 
-	/* Update host regs for mret — switch_to already did this via regs */
-	return SBI_ERR_SM_ENCLAVE_SUCCESS;
+	/* Direct mret — bypass OpenSBI sbi_trap_exit which clears MPV.
+	 * context_switch_to already set all CSRs (hstatus, hgatp, mtvec).
+	 * We just restore GPRs + mstatus + mepc and mret into VS-mode.
+	 * This function never returns. */
+	tee_mret(regs);
 }
 
 unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)

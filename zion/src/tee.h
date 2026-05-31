@@ -229,4 +229,4 @@ unsigned long sbi_sm_cycle_end(void);
 unsigned long sbi_sm_clean_sec_mem(void);
 
 #endif
-extern volatile bool tee_pending_virt;
+extern void tee_mret(struct sbi_trap_regs *regs) __attribute__((noreturn));
