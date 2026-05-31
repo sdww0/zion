@@ -145,17 +145,17 @@ static void setup_enclave_thread(struct tee_thread *thread,
 				 uintptr_t arg0,
 				 enclave_id eid)
 {
-	/* CSRs for VS-mode enclave execution */
+	/* CSRs for VS-mode enclave execution.
+	 * MPP=S, MPV=1 → mret enters VS-mode.
+	 * No MPIE/SIE — enclave starts with interrupts off (Eyrie sets them up). */
 	thread->csrs.mepc = entry_point;
 	thread->csrs.mstatus = (PRV_S << MSTATUS_MPP_SHIFT) |
-			       MSTATUS_MPV |   /* enter VS-mode on mret */
-			       MSTATUS_MPIE | MSTATUS_SIE;
-	sbi_printf("[SM] setup_enclave_thread: mstatus=0x%lx\n", thread->csrs.mstatus);
+			       MSTATUS_MPV;
 	thread->csrs.hstatus = HSTATUS_SPV | HSTATUS_VSXL;
 	thread->csrs.hcounteren = 0x7; /* enable cycle/time/inst counters */
 	thread->csrs.hgatp = enc->hgatp;
 	thread->csrs.vsatp = 0; /* no S-mode page table initially */
-	thread->csrs.vsstatus = 0;
+	thread->csrs.vsstatus = SSTATUS_SUM; /* allow S-mode to access U-mode pages */
 	thread->csrs.vstvec = 0;
 	thread->csrs.vsscratch = 0;
 	thread->csrs.vsepc = 0;
@@ -165,10 +165,20 @@ static void setup_enclave_thread(struct tee_thread *thread,
 	thread->csrs.vsip = 0;
 	thread->csrs.hvip = 0;
 
-	/* GPRs — Eyrie runtime expects: a0=entry_arg, sp=stack */
+	/* GPRs — Eyrie runtime eyrie_boot(a0, a1..a7) expects:
+	 * a0 = dummy (SBI return value), a1 = dram_base, a2 = dram_size,
+	 * a3 = runtime_base, a4 = user_base, a5 = free_base,
+	 * a6 = untrusted_base, a7 = untrusted_size */
 	sbi_memset(&thread->gprs, 0, sizeof(thread->gprs));
 	thread->gprs.sp = sp;
-	thread->gprs.a0 = arg0;
+	thread->gprs.a0 = arg0; /* dram_base (Eyrie's "dummy" param) */
+	thread->gprs.a1 = enc->params.dram_base;
+	thread->gprs.a2 = enc->params.dram_size;
+	thread->gprs.a3 = enc->params.runtime_base;
+	thread->gprs.a4 = enc->params.user_base;
+	thread->gprs.a5 = enc->params.free_base;
+	thread->gprs.a6 = enc->params.untrusted_base;
+	thread->gprs.a7 = enc->params.untrusted_size;
 
 	/* Thread state */
 	thread->state.mode = ENCLAVE;

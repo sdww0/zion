@@ -88,13 +88,13 @@ static const unsigned long cvm_hedeleg =
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
 	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
 
-/* ENCLAVE - Keystone approach: mideleg=0, all interrupts to M-mode */
+/* ENCLAVE - Keystone approach: mideleg=0, all interrupts to M-mode.
+ * medeleg=0: all exceptions trap to M-mode first, then hedeleg decides
+ * whether to delegate to VS-mode. If we used medeleg, exceptions would
+ * go to HS-mode where there's no handler (stvec=0 → crash). */
 static const unsigned long enclave_mideleg = 0;
 static const unsigned long enclave_hideleg = 0;
-static const unsigned long enclave_medeleg =
-	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
-	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
-	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
+static const unsigned long enclave_medeleg = 0;
 static const unsigned long enclave_hedeleg =
 	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
