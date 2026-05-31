@@ -512,8 +512,11 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	context_switch_to(regs, &tee_threads[0], thread,
 			  REE_TO_ENCLAVE, 0, NULL, NULL);
 
-	/* Tell OpenSBI trap exit to enter VS-mode on mret */
-	return SBI_ERR_SM_ENCLAVE_SUCCESS;
+	/* Direct mret into enclave — same as run_enclave.
+	 * MUST bypass OpenSBI sbi_trap_exit which clears MPV. */
+	sbi_printf("[SM] resuming enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
+		   regs->mepc, regs->mstatus);
+	tee_mret(regs);
 }
 
 /* ---- Attestation (stubs — full implementation TBD) ---- */

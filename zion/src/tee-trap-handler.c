@@ -453,28 +453,18 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 
 		switch (interrupt_cause) {
 		case IRQ_M_TIMER:
-			/*
-			 * Keystone approach: M-timer fired during enclave execution
-			 * (host kernel programmed mtimecmp via SBI). Stop the enclave
-			 * (not destroy), return to host. Host kernel will service the
-			 * timer and resume. This is the primary timer path when sstc
-			 * is disabled.
-			 */
 			deliver_trap_to_ree(regs->mepc,
 					    interrupt_cause | interrupt_mask,
 					    trap);
 			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->mepc += 4; /* advance host PC past run_enclave ecall */
 			goto trap_done;
 		case IRQ_S_TIMER:
-			/*
-			 * S-timer fired during enclave execution (sstc was enabled
-			 * by kernel before SM disabled it, or race condition).
-			 * Same handling as M-timer: stop enclave, return to host.
-			 */
 			deliver_trap_to_ree(regs->mepc,
 					    interrupt_cause | interrupt_mask,
 					    trap);
 			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->mepc += 4;
 			goto trap_done;
 		case IRQ_M_SOFT:
 			sbi_ipi_process();
@@ -486,6 +476,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 					    interrupt_cause | interrupt_mask,
 					    trap);
 			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->mepc += 4;
 			goto trap_done;
 		default:
 			msg = "unhandled enclave interrupt";

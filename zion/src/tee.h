@@ -228,5 +228,7 @@ unsigned long sbi_sm_cycle_begin(void);
 unsigned long sbi_sm_cycle_end(void);
 unsigned long sbi_sm_clean_sec_mem(void);
 
-#endif
+/* tee_mret: direct mret bypassing OpenSBI sbi_trap_exit (tee-trap.S) */
 extern void tee_mret(struct sbi_trap_regs *regs) __attribute__((noreturn));
+
+#endif
