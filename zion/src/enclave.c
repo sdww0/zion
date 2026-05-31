@@ -18,6 +18,8 @@
 #include <crypto.h>
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_console.h>
+#include <sbi/riscv_asm.h>
+#include <sbi/riscv_encoding.h>
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_error.h>
 #include <sbi/riscv_locks.h>
@@ -276,7 +278,7 @@ unsigned long create_enclave(unsigned long *eidptr,
 	if (!root_pt)
 		goto free_blocks;
 	uint64_t hgatp = ((unsigned long)root_pt >> PAGE_SHIFT) |
-			 (HGATP_MODE_SV39X4 << HGATP_MODE_SHIFT);
+		 (HGATP_MODE_SV48X4 << HGATP_MODE_SHIFT);
 
 	/* ---- Fill enclave metadata ---- */
 	enclaves[eid].eid = eid;
@@ -386,12 +388,26 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
 	setup_enclave_thread(thread, &enclaves[eid], entry, sp, arg0, eid);
 
-	sbi_printf("[SM] thread CSRs: mstatus=0x%lx mepc=0x%lx hstatus=0x%lx\n",
-		   thread->csrs.mstatus, thread->csrs.mepc, thread->csrs.hstatus);
-	sbi_printf("[SM] thread CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx\n",
-		   thread->csrs.hgatp, thread->csrs.hcounteren, thread->csrs.vsatp);
-	sbi_printf("[SM] thread GPRs: sp=0x%lx a0=0x%lx\n",
-		   thread->gprs.sp, thread->gprs.a0);
+	sbi_printf("[SM] ===== ENCLAVE FIRST ENTRY =====\n");
+	sbi_printf("[SM] CSRs: mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
+		   thread->csrs.mepc, thread->csrs.mstatus, thread->csrs.hstatus);
+	sbi_printf("[SM] CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx vsstatus=0x%lx\n",
+		   thread->csrs.hgatp, thread->csrs.hcounteren,
+		   thread->csrs.vsatp, thread->csrs.vsstatus);
+	sbi_printf("[SM] CSRs: vstvec=0x%lx vsscratch=0x%lx vsepc=0x%lx vscause=0x%lx\n",
+		   thread->csrs.vstvec, thread->csrs.vsscratch,
+		   thread->csrs.vsepc, thread->csrs.vscause);
+	sbi_printf("[SM] GPRs: sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx\n",
+		   thread->gprs.sp, thread->gprs.a0,
+		   thread->gprs.a1, thread->gprs.a2);
+	sbi_printf("[SM] GPRs: a3=0x%lx a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+		   thread->gprs.a3, thread->gprs.a4, thread->gprs.a5,
+		   thread->gprs.a6, thread->gprs.a7);
+	sbi_printf("[SM] Params: dram=0x%lx size=0x%lx runtime=0x%lx user=0x%lx\n",
+		   p->dram_base, p->dram_size, p->runtime_base, p->user_base);
+	sbi_printf("[SM] Params: free=0x%lx utm=0x%lx utm_size=0x%lx\n",
+		   p->free_base, p->untrusted_base, p->untrusted_size);
+	sbi_printf("[SM] =================================\n");
 
 	enclaves[eid].active_thread = thread;
 	cpu_enter_enclave_context(eid);
@@ -415,6 +431,36 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
 	sbi_printf("[SM] entering enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
 		   regs->mepc, regs->mstatus);
+
+	sbi_printf("[SM] ===== REE->ENCLAVE REG DUMP =====\n");
+	sbi_printf("[SM]   mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu sie=%lu\n",
+		   regs->mepc, regs->mstatus,
+		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
+		   (regs->mstatus & MSTATUS_MPV) >> 39,
+		   (regs->mstatus & MSTATUS_SIE) >> 1);
+	sbi_printf("[SM]   hgatp=0x%lx hstatus=0x%lx mtvec=0x%lx\n",
+		   csr_read(CSR_HGATP), csr_read(CSR_HSTATUS),
+		   csr_read(CSR_MTVEC));
+	sbi_printf("[SM]   medeleg=0x%lx mideleg=0x%lx mie=0x%lx\n",
+		   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG),
+		   csr_read(CSR_MIE));
+	sbi_printf("[SM]   hideleg=0x%lx hedeleg=0x%lx\n",
+		   csr_read(CSR_HIDELEG), csr_read(CSR_HEDELEG));
+	sbi_printf("[SM]   satp=0x%lx sscratch=0x%lx stvec=0x%lx\n",
+		   csr_read(CSR_SATP), csr_read(CSR_SSCRATCH),
+		   csr_read(CSR_STVEC));
+	sbi_printf("[SM]   vsstatus=0x%lx vsatp=0x%lx vstvec=0x%lx\n",
+		   csr_read(CSR_VSSTATUS), csr_read(CSR_VSATP),
+		   csr_read(CSR_VSTVEC));
+	sbi_printf("[SM]   GPRs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+		   regs->a0, regs->a1, regs->a2, regs->a3);
+	sbi_printf("[SM]   GPRs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+		   regs->a4, regs->a5, regs->a6, regs->a7);
+	sbi_printf("[SM]   GPRs: sp=0x%lx ra=0x%lx gp=0x%lx tp=0x%lx\n",
+		   regs->sp, regs->ra, regs->gp, regs->tp);
+	sbi_printf("[SM]   GPRs: t0=0x%lx t1=0x%lx t2=0x%lx s0=0x%lx\n",
+		   regs->t0, regs->t1, regs->t2, regs->s0);
+	sbi_printf("[SM] ===== REE->ENCLAVE DUMP END =====\n");
 
 	/* Direct mret — bypass OpenSBI sbi_trap_exit which clears MPV.
 	 * context_switch_to already set all CSRs (hstatus, hgatp, mtvec).

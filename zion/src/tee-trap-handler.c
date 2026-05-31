@@ -453,17 +453,22 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 
 		switch (interrupt_cause) {
 		case IRQ_M_TIMER:
-			deliver_trap_to_ree(regs->mepc,
-					    interrupt_cause | interrupt_mask,
-					    trap);
+			sbi_printf("[SM] IRQ_M_TIMER in enclave, stopping eid=%d\n", eid);
 			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
-			regs->mepc += 4; /* advance host PC past run_enclave ecall */
+			sbi_printf("[SM] IRQ_M_TIMER: stop done, rc=%d mepc=0x%lx\n", rc, regs->mepc);
+			/* Return SBI_ERR_SM_ENCLAVE_INTERRUPTED to kernel.
+			 * Do NOT call deliver_trap_to_ree — M-mode cause (7) is
+			 * wrong for S-mode scause, and the M-timer has been consumed.
+			 * Kernel checks ret.error and handles timer itself. */
+			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
+			regs->a1 = 0;
+			regs->mepc += 4;
+			sbi_printf("[SM] IRQ_M_TIMER: a0=0x%lx mepc=0x%lx\n", regs->a0, regs->mepc);
 			goto trap_done;
 		case IRQ_S_TIMER:
-			deliver_trap_to_ree(regs->mepc,
-					    interrupt_cause | interrupt_mask,
-					    trap);
 			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
+			regs->a1 = 0;
 			regs->mepc += 4;
 			goto trap_done;
 		case IRQ_M_SOFT:
@@ -472,10 +477,9 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			goto trap_done;
 		case IRQ_S_SOFT:
 		case IRQ_S_EXT:
-			deliver_trap_to_ree(regs->mepc,
-					    interrupt_cause | interrupt_mask,
-					    trap);
 			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
+			regs->a1 = 0;
 			regs->mepc += 4;
 			goto trap_done;
 		default:
@@ -547,6 +551,14 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 				(trap->tval2 << 2) | (trap->tval & 0x3);
 			struct enclave *enc = &enclaves[eid];
 
+			sbi_printf("[SM] page fault: addr=0x%lx mepc=0x%lx "
+				   "epm=[0x%lx, 0x%lx) utm=[0x%lx, 0x%lx)\n",
+				   fault_addr, regs->mepc,
+				   enc->mem_info.epm_base,
+				   enc->mem_info.epm_base + enc->mem_info.epm_size,
+				   enc->mem_info.utm_base,
+				   enc->mem_info.utm_base + enc->mem_info.utm_size);
+
 			if (enc->mem_info.epm_base &&
 			    fault_addr >= enc->mem_info.epm_base &&
 			    fault_addr < enc->mem_info.epm_base +
@@ -597,12 +609,54 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 	}
 
 trap_done:
+	sbi_printf("[SM] encl_trap_done: rc=%d mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu\n",
+		   rc, regs->mepc, regs->mstatus,
+		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
+		   (regs->mstatus & MSTATUS_MPV) >> 39);
+
+	sbi_printf("[SM] ===== ENCLAVE->REE REG DUMP =====\n");
+	sbi_printf("[SM]   mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu sie=%lu\n",
+		   regs->mepc, regs->mstatus,
+		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
+		   (regs->mstatus & MSTATUS_MPV) >> 39,
+		   (regs->mstatus & MSTATUS_SIE) >> 1);
+	sbi_printf("[SM]   hgatp=0x%lx hstatus=0x%lx mtvec=0x%lx\n",
+		   csr_read(CSR_HGATP), csr_read(CSR_HSTATUS),
+		   csr_read(CSR_MTVEC));
+	sbi_printf("[SM]   medeleg=0x%lx mideleg=0x%lx mie=0x%lx\n",
+		   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG),
+		   csr_read(CSR_MIE));
+	sbi_printf("[SM]   hideleg=0x%lx hedeleg=0x%lx\n",
+		   csr_read(CSR_HIDELEG), csr_read(CSR_HEDELEG));
+	sbi_printf("[SM]   satp=0x%lx sscratch=0x%lx stvec=0x%lx\n",
+		   csr_read(CSR_SATP), csr_read(CSR_SSCRATCH),
+		   csr_read(CSR_STVEC));
+	sbi_printf("[SM]   vsstatus=0x%lx vsatp=0x%lx vstvec=0x%lx\n",
+		   csr_read(CSR_VSSTATUS), csr_read(CSR_VSATP),
+		   csr_read(CSR_VSTVEC));
+	sbi_printf("[SM]   GPRs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+		   regs->a0, regs->a1, regs->a2, regs->a3);
+	sbi_printf("[SM]   GPRs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+		   regs->a4, regs->a5, regs->a6, regs->a7);
+	sbi_printf("[SM]   GPRs: sp=0x%lx ra=0x%lx gp=0x%lx tp=0x%lx\n",
+		   regs->sp, regs->ra, regs->gp, regs->tp);
+	sbi_printf("[SM]   GPRs: t0=0x%lx t1=0x%lx t2=0x%lx s0=0x%lx\n",
+		   regs->t0, regs->t1, regs->t2, regs->s0);
+	sbi_printf("[SM] ===== ENCLAVE->REE DUMP END =====\n");
+
 	if (rc)
 		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
 			       trap->tinst, regs);
 
-	if (((regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT) != PRV_M)
-		sbi_sse_process_pending_events(regs);
+	/* Do NOT call sbi_sse_process_pending_events(regs) here.
+	 * After context_switch_from() (via stop_enclave), regs contains
+	 * the HOST's return state.  If any SSE event is pending,
+	 * sse_event_inject() overwrites regs->mepc and regs->mstatus,
+	 * corrupting the host's ecall return address and privilege mode.
+	 * This is the same clobber bug fixed in sbi_trap_handler with the
+	 * tee_context_switch flag — but enclave_trap_handler has its own
+	 * independent call site that was missed.  SSE events will be
+	 * delivered to the host kernel on the next M-mode trap cycle. */
 
 	sbi_trap_set_context(scratch, tcntx->prev_context);
 	return tcntx;

@@ -380,7 +380,10 @@ static inline void switch_from_csrs(struct sbi_trap_regs *regs,
 		LOCAL_SWITCH_CSR(hstatus);
 		LOCAL_SWITCH_CSR(scounteren);
 
+		/* MUST restore host's hgatp — enclave's G-stage page table
+		 * must not remain active after exit. */
 		s_csrs->hgatp	   = csr_read_set(CSR_HGATP, 0);
+		csr_write(CSR_HGATP, d_csrs->hgatp);
 		s_csrs->hcounteren = csr_read_set(CSR_HCOUNTEREN, 0);
 		s_csrs->vsstatus   = csr_read_set(CSR_VSSTATUS, 0);
 		s_csrs->vsie	   = csr_read_set(CSR_VSIE, 0);
@@ -409,14 +412,14 @@ static inline void switch_trap_deleg(struct zion_state *state)
 		csr_write(CSR_MEDELEG, cvm_medeleg);
 		csr_write(CSR_HEDELEG, cvm_hedeleg);
 	} else if (state->mode == ENCLAVE) {
-		sbi_printf("[SM] switch_trap_deleg: ENCLAVE, medeleg before=0x%lx\n",
-			   csr_read(CSR_MEDELEG));
+		sbi_printf("[SM] switch_trap_deleg: ENCLAVE, medeleg before=0x%lx mideleg before=0x%lx\n",
+			   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG));
 		csr_write(CSR_MIDELEG, enclave_mideleg);
 		csr_write(CSR_HIDELEG, enclave_hideleg);
 		csr_write(CSR_MEDELEG, enclave_medeleg);
 		csr_write(CSR_HEDELEG, enclave_hedeleg);
-		sbi_printf("[SM] switch_trap_deleg: medeleg after=0x%lx\n",
-			   csr_read(CSR_MEDELEG));
+		sbi_printf("[SM] switch_trap_deleg: medeleg after=0x%lx mideleg after=0x%lx\n",
+			   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG));
 	}
 }
 
@@ -497,9 +500,11 @@ void context_switch_from(struct sbi_trap_regs *regs,
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == REE_FROM_ENCLAVE) {
 
+		sbi_printf("[SM] context_switch_from: REE_FROM_ENCLAVE, switching vector and PMP\n");
 		switch_vector_to_ree();
 		pmp_set_keystone(tee_region_id, PMP_NO_PERM);
 		__sbi_hfence_gvma_all();
+		sbi_printf("[SM] context_switch_from: REE_FROM_ENCLAVE done, switching trap_deleg\n");
 	} else if (context_mode == CVM_FROM_ENCLAVE) {
 
 		__sbi_hfence_gvma_all();
@@ -508,4 +513,8 @@ void context_switch_from(struct sbi_trap_regs *regs,
 
 	switch_gprs(regs, s_gprs, d_gprs, return_on_resume);
 	switch_from_csrs(regs, s_csrs, d_csrs, context_mode);
+
+	if (context_mode == REE_FROM_ENCLAVE)
+		sbi_printf("[SM] context_switch_from: COMPLETE, mepc=0x%lx mstatus=0x%lx\n",
+			   regs->mepc, regs->mstatus);
 }

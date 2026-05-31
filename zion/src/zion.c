@@ -4,6 +4,7 @@
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
 #include "enclave.h"
+#include "tee.h"
 #include "sm.h"
 #include "pmp.h"
 #include "platform-hook.h"
@@ -42,6 +43,12 @@ void zion_init(bool cold_boot)
 	/* All harts: init PMP and platform */
 	pmp_init();
 	platform_init_global();
+
+	/* Initialize host thread state for this hart.
+	 * tee_threads[mhartid] is the host thread. Its state.mode must be REE
+	 * so that switch_trap_deleg() uses REE delegation values (not CVM). */
+	unsigned long hart = csr_read(mhartid);
+	tee_threads[hart].state.mode = REE;
 
 	/*
 	 * Disable sstc on every hart: clear menvcfg.STCE.
