@@ -30,6 +30,68 @@
 #include "platform-hook.h"
 #include TARGET_PLATFORM_HEADER
 
+/* Eyrie runtime virtual address constants (from runtime/include/mm/vm_defs.h) */
+#define EYRIE_VA_START    0xffffffffc0000000UL
+#define SATP_MODE_SV48    (9UL << 60)
+#define PT_ENTRIES         512
+
+/* Sv48 PTE: PPN [53:10], flags [9:0] */
+#define VS_PTE_PPN_SHIFT  10
+#define VS_LEAF_PTE(pa, flags) \
+	((((uint64_t)(pa)) >> 12 << VS_PTE_PPN_SHIFT) | (flags))
+
+/**
+ * setup_enclave_vsatp - build VS-stage page tables for Eyrie runtime.
+ *
+ * The Eyrie runtime is linked at VA 0xffffffffc0000000. The driver does NOT
+ * load the Eyrie loader-binary at dram_base, so the SM must create VS-stage
+ * page tables for the runtime to execute at its linked virtual address.
+ *
+ * Allocates 3 pages from enclave free memory:
+ *   root (L4)[0]   -> id_map L3: identity-map dram_base as 2MB megapage
+ *   root (L4)[511] -> va L3:     map RUNTIME_VA_START -> runtime_base (2MB)
+ *
+ * Returns SATP value (Sv48 mode + root_ppn) for vsatp.
+ */
+static uint64_t setup_enclave_vsatp(struct runtime_params_t *p)
+{
+	uintptr_t pt_pages[3];
+	for (int i = 0; i < 3; i++) {
+		pt_pages[i] = p->free_base + (uintptr_t)i * PAGE_SIZE;
+		volatile uint64_t *page = (volatile uint64_t *)pt_pages[i];
+		for (int j = 0; j < PT_ENTRIES; j++)
+			page[j] = 0;
+	}
+	p->free_base += 3 * PAGE_SIZE;
+
+	uintptr_t root_pt  = pt_pages[0];
+	uintptr_t id_l3_pt = pt_pages[1];
+	uintptr_t va_l3_pt = pt_pages[2];
+
+	volatile uint64_t *root  = (volatile uint64_t *)root_pt;
+	volatile uint64_t *id_l3 = (volatile uint64_t *)id_l3_pt;
+	volatile uint64_t *va_l3 = (volatile uint64_t *)va_l3_pt;
+
+	uint64_t leaf = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+
+	/* Root[0] -> identity-map L3, Root[511] -> VA L3 */
+	root[0]   = VS_LEAF_PTE(id_l3_pt, PTE_V);
+	root[511] = VS_LEAF_PTE(va_l3_pt, PTE_V);
+
+	/* Identity map: dram_base as 2MB megapage */
+	uint64_t id_vpn2 = ((uint64_t)p->dram_base >> 21) & 0x1FF;
+	id_l3[id_vpn2] = VS_LEAF_PTE(p->dram_base & ~0x1FFFFFUL, leaf);
+
+	/* VA map: RUNTIME_VA_START -> runtime_base (2MB megapage) */
+	uintptr_t rt_mega = p->runtime_base & ~0x1FFFFFUL;
+	va_l3[511] = VS_LEAF_PTE(rt_mega, leaf);
+
+	uint64_t vsatp = SATP_MODE_SV48 | ((uint64_t)root_pt >> PAGE_SHIFT);
+	sbi_printf("[SM] vsatp: root=0x%lx runtime=0x%lx id[%lu] vsatp=0x%lx\n",
+		   root_pt, p->runtime_base, id_vpn2, vsatp);
+	return vsatp;
+}
+
 /* ---- Global attestation state (was in keystone/sm.c) ---- */
 byte sm_hash[MDSIZE] = { 0 };
 byte sm_signature[SIGNATURE_SIZE] = { 0 };
@@ -72,18 +134,24 @@ static spinlock_t encl_lock = SPIN_LOCK_INITIALIZER;
 
 static unsigned long encl_alloc_eid(enclave_id *_eid)
 {
+	spin_lock(&encl_lock);
 	for (int i = 0; i < ENCL_MAX; i++) {
 		if (enclaves[i].state == INVALID) {
+			enclaves[i].state = ALLOCATED;
+			spin_unlock(&encl_lock);
 			*_eid = i;
 			return SBI_ERR_SM_ENCLAVE_SUCCESS;
 		}
 	}
+	spin_unlock(&encl_lock);
 	return SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
 }
 
 static unsigned long encl_free_eid(enclave_id eid)
 {
+	spin_lock(&encl_lock);
 	enclaves[eid].state = INVALID;
+	spin_unlock(&encl_lock);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
@@ -95,6 +163,7 @@ void enclave_init_metadata(void)
 		enclaves[i].n_thread = 0;
 		sbi_memset(&enclaves[i].regions, 0,
 			   sizeof(enclaves[i].regions));
+		platform_init_enclave(&enclaves[i]);
 	}
 }
 
@@ -126,15 +195,50 @@ uintptr_t get_enclave_region_size(enclave_id eid, int memid)
 unsigned long copy_enclave_create_args(uintptr_t src,
 				       struct keystone_sbi_create_t *dest)
 {
-	return copy_to_sm(dest, src, sizeof(struct keystone_sbi_create_t));
+	int region_overlap = copy_to_sm(dest, src, sizeof(struct keystone_sbi_create_t));
+
+	if (region_overlap)
+		return SBI_ERR_SM_ENCLAVE_REGION_OVERLAPS;
+	else
+		return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
 static int is_create_args_valid(struct keystone_sbi_create_t *args)
 {
-	if (args->epm_region.size < RISCV_PGSIZE)
+	uintptr_t epm_start, epm_end;
+
+	if (args->epm_region.size <= 0)
 		return 0;
-	if (args->utm_region.size == 0)
+
+	/* check for overflow */
+	if (args->epm_region.paddr >=
+	    args->epm_region.paddr + args->epm_region.size)
 		return 0;
+	if (args->utm_region.paddr >=
+	    args->utm_region.paddr + args->utm_region.size)
+		return 0;
+
+	epm_start = args->epm_region.paddr;
+	epm_end   = args->epm_region.paddr + args->epm_region.size;
+
+	/* check that runtime/user/free pointers are within EPM */
+	if (args->runtime_paddr < epm_start ||
+	    args->runtime_paddr >= epm_end)
+		return 0;
+	if (args->user_paddr < epm_start ||
+	    args->user_paddr >= epm_end)
+		return 0;
+	if (args->free_paddr < epm_start ||
+	    args->free_paddr > epm_end)
+		/* note: free_paddr == epm_end if there's no free memory */
+		return 0;
+
+	/* check ordering: runtime < user < free */
+	if (args->runtime_paddr > args->user_paddr)
+		return 0;
+	if (args->user_paddr > args->free_paddr)
+		return 0;
+
 	return 1;
 }
 
@@ -219,6 +323,9 @@ unsigned long create_enclave(unsigned long *eidptr,
 	if (ret != SBI_ERR_SM_ENCLAVE_SUCCESS)
 		return ret;
 
+	/* Clean UTM to prevent data leakage from previous enclave */
+	sbi_memset((void *)utm_pa, 0, utm_size);
+
 	/* ---- Allocate EPM blocks from secure memory pool ---- */
 	int n_blocks = (epm_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
 	uint64_t epm_blocks[16]; /* max 32MB (16 * 2MB) */
@@ -239,15 +346,32 @@ unsigned long create_enclave(unsigned long *eidptr,
 	}
 
 	/* ---- Copy EPM content from driver-allocated PA → secure pool ---- */
+	sbi_printf("[SM] create_enclave: EPM copy: epm_pa=0x%lx n_blocks=%d block_size=0x%lx\n",
+		   epm_pa, n_blocks, BLOCK_SIZE);
+	/* GPA may not be BLOCK_SIZE-aligned (2MB). map_gpa_to_hpa uses megapages,
+	 * which auto-align to 2MB. Data must go to the correct offset within
+	 * the megapage: block_base + (epm_pa % BLOCK_SIZE). */
+	uintptr_t gpa_offset = epm_pa & (BLOCK_SIZE - 1);
+	sbi_printf("[SM]   gpa_offset=0x%lx within megapage\n", gpa_offset);
 	for (int i = 0; i < n_blocks; i++) {
 		size_t chunk = (i == n_blocks - 1) ?
 			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
-		/* M-mode direct PA access — no MPRV needed.
-		 * src (epm_pa) is kernel-allocated physical memory,
-		 * dst (epm_blocks[i]) is secure pool physical memory.
-		 * Both accessible from M-mode without page table walk. */
-		sbi_memcpy((void *)epm_blocks[i],
-			   (void *)(epm_pa + i * BLOCK_SIZE), chunk);
+		uintptr_t src = epm_pa + i * BLOCK_SIZE;
+		/* dst must account for GPA offset within the 2MB megapage */
+		uintptr_t dst = epm_blocks[i] + gpa_offset;
+		sbi_printf("[SM]   block[%d]: src=0x%lx dst=0x%lx chunk=0x%lx\n",
+			   i, src, dst, chunk);
+		sbi_printf("[SM]   src[0..3]: %08x %08x %08x %08x\n",
+			   ((volatile uint32_t *)src)[0],
+			   ((volatile uint32_t *)src)[1],
+			   ((volatile uint32_t *)src)[2],
+			   ((volatile uint32_t *)src)[3]);
+		sbi_memcpy((void *)dst, (void *)src, chunk);
+		sbi_printf("[SM]   dst[0..3]: %08x %08x %08x %08x\n",
+			   ((volatile uint32_t *)dst)[0],
+			   ((volatile uint32_t *)dst)[1],
+			   ((volatile uint32_t *)dst)[2],
+			   ((volatile uint32_t *)dst)[3]);
 	}
 
 	/* ---- Build G-stage page table ---- */
@@ -382,9 +506,16 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
 	/* Entry point and args from Eyrie runtime layout */
 	struct runtime_params_t *p = &enclaves[eid].params;
-	uintptr_t entry = p->runtime_base;
+
+	/* Entry point = dram_base (loader-binary entry, loaded by host SDK) */
+	uintptr_t entry = p->dram_base;
 	uintptr_t sp = p->free_base + p->free_requested; /* stack at top of free */
 	uintptr_t arg0 = p->dram_base; /* Eyrie expects dram_base in a0 */
+
+	sbi_printf("[SM] run_enclave: eid=%d entry=0x%lx dram_base=0x%lx runtime=0x%lx\n",
+		   eid, entry, p->dram_base, p->runtime_base);
+	sbi_printf("[SM]   dram_size=0x%lx user=0x%lx free=0x%lx utm=0x%lx\n",
+		   p->dram_size, p->user_base, p->free_base, p->untrusted_base);
 
 	setup_enclave_thread(thread, &enclaves[eid], entry, sp, arg0, eid);
 
@@ -467,6 +598,7 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	 * We just restore GPRs + mstatus + mepc and mret into VS-mode.
 	 * This function never returns. */
 	tee_mret(regs);
+	__builtin_unreachable();
 }
 
 unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
@@ -524,9 +656,24 @@ unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request,
 	/* Save enclave PC for resume — regs->mepc was saved by switch_from_csrs
 	 * into encl_thread->csrs.mepc, but we also stash it here for resume. */
 	enclaves[eid].saved_mepc = encl_thread->csrs.mepc;
+
+	/* Fix mstatus.MPP: hardware sets MPP=M (0b11) on trap to M-mode.
+	 * On resume, mret uses MPP to determine target mode — with MPP=M
+	 * the CPU stays in M-mode instead of VS-mode → illegal instruction.
+	 * Force MPP=S + MPV=1 so mret enters VS-mode (enclave execution mode). */
+	encl_thread->csrs.mstatus &= ~MSTATUS_MPP;
+	encl_thread->csrs.mstatus |= (PRV_S << MSTATUS_MPP_SHIFT) | MSTATUS_MPV;
+
 	/* Keep active_thread alive — resume will reuse it */
 
-	return SBI_ERR_SM_ENCLAVE_SUCCESS;
+	switch (request) {
+	case STOP_TIMER_INTERRUPT:
+		return SBI_ERR_SM_ENCLAVE_INTERRUPTED;
+	case STOP_EDGE_CALL_HOST:
+		return SBI_ERR_SM_ENCLAVE_EDGE_CALL_HOST;
+	default:
+		return SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR;
+	}
 }
 
 unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
@@ -573,6 +720,7 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	sbi_printf("[SM] resuming enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
 		   regs->mepc, regs->mstatus);
 	tee_mret(regs);
+	__builtin_unreachable();
 }
 
 /* ---- Attestation (stubs — full implementation TBD) ---- */
@@ -615,21 +763,19 @@ unsigned long sbi_sm_destroy_enclave(unsigned long eid)
 }
 
 unsigned long sbi_sm_run_enclave(struct sbi_trap_regs *regs,
-				 unsigned long eid)
+			 unsigned long eid)
 {
-	run_enclave(regs, (enclave_id)eid);
-	/* Execution continues in enclave; regs now has enclave state.
-	 * Set a0 to success for when the enclave exits back. */
-	regs->a0 = SBI_ERR_SM_ENCLAVE_SUCCESS;
-	return 0;
+	return run_enclave(regs, (enclave_id)eid);
+	/* On success, run_enclave calls tee_mret and never returns.
+	 * On failure, it returns an error code to the host. */
 }
 
 unsigned long sbi_sm_resume_enclave(struct sbi_trap_regs *regs,
 				    unsigned long eid)
 {
-	unsigned long ret = resume_enclave(regs, (enclave_id)eid);
-	regs->a0 = ret;
-	return 0;
+	return resume_enclave(regs, (enclave_id)eid);
+	/* On success, resume_enclave calls tee_mret and never returns.
+	 * On failure, it returns an error code to the host. */
 }
 
 unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
@@ -637,9 +783,11 @@ unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
 {
 	enclave_id eid = (enclave_id)cpu_get_enclave_id();
 	unsigned long ret = exit_enclave(regs, eid);
-	regs->a0 = ret;
-	regs->a1 = retval;
-	return 0;
+	/* Do NOT set regs->a0/a1 here — sbi_ecall_handler will
+	 * overwrite them.  Use out->value instead (set in
+	 * sbi_ecall_tee_handler) so host sees a0=0, a1=retval. */
+	(void)ret;
+	return retval;
 }
 
 unsigned long sbi_sm_stop_enclave(struct sbi_trap_regs *regs,
@@ -647,8 +795,9 @@ unsigned long sbi_sm_stop_enclave(struct sbi_trap_regs *regs,
 {
 	enclave_id eid = (enclave_id)cpu_get_enclave_id();
 	unsigned long ret = stop_enclave(regs, request, eid);
-	regs->a0 = ret;
-	return 0;
+	/* Do NOT set regs->a0 here — sbi_ecall_handler will overwrite.
+	 * Return ret (0=success) so sbi_ecall_handler sets a0=0. */
+	return ret;
 }
 
 unsigned long sbi_sm_attest_enclave(uintptr_t report, uintptr_t data,
