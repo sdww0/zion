@@ -3,6 +3,7 @@
  */
 #include "enclave.h"
 #include "pmp.h"
+#include "zion.h"
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_console.h>
 #include <sbi/riscv_asm.h>
@@ -78,5 +79,5 @@ void sm_copy_key(void)
 	sbi_memcpy(sm_private_key, test_sm_private_key, PRIVATE_KEY_SIZE);
 	sbi_memcpy(sm_public_key, test_sm_public_key, PUBLIC_KEY_SIZE);
 	sbi_memcpy(dev_public_key, _sanctum_dev_public_key, PUBLIC_KEY_SIZE);
-	sbi_printf("[SM] Test attestation keys loaded\n");
+	tee_log("[SM] Test attestation keys loaded\n");
 }

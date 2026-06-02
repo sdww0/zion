@@ -17,7 +17,7 @@ extern struct sbi_ecall_extension ecall_zion_tee;
 void zion_init(bool cold_boot)
 {
 	if (cold_boot) {
-		sbi_printf("[SBI] Zion TEE initializing ... hart [%lx]\n",
+		tee_log("[SBI] Zion TEE initializing ... hart [%lx]\n",
 			   csr_read(mhartid));
 
 		/* Register unified TEE SBI extension (CVM + Enclave) */
@@ -56,7 +56,7 @@ void zion_init(bool cold_boot)
 	 */
 	csr_clear(CSR_MENVCFG, ENVCFG_STCE);
 	if (cold_boot)
-		sbi_printf("[SBI] sstc disabled on all harts\n");
+		tee_log("[SBI] sstc disabled on all harts\n");
 
 	/* Enable counters */
 	csr_write(CSR_MCOUNTINHIBIT, 0);
@@ -64,7 +64,7 @@ void zion_init(bool cold_boot)
 	csr_write(CSR_SCOUNTEREN, 0x7);
 
 	if (cold_boot)
-		sbi_printf("[SBI] Zion TEE initialized\n");
+		tee_log("[SBI] Zion TEE initialized\n");
 }
 
 void zion_enable_counters(void)

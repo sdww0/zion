@@ -51,26 +51,36 @@ struct zion_state {
 void zion_init(bool cold_boot);
 void zion_enable_counters(void);
 
-#define DEBUG
-#ifdef DEBUG
+/*
+ * ZION_DEBUG master switch — controls ALL SM debug output.
+ *   #define ZION_DEBUG    → debug prints ON  (verbose)
+ *   // #define ZION_DEBUG → debug prints OFF (production, default)
+ *
+ * Override via CFLAGS: -DZION_DEBUG
+ */
+#define ZION_DEBUG
+
+#ifdef ZION_DEBUG
 #define zion_printf(...) \
 	do {                 \
 		sbi_printf(__VA_ARGS__); \
 	} while (0)
-#else
-#define zion_printf(...) \
-	do {                 \
-	} while (0)
-#endif
-
-/* SM debug print: controlled by DEBUG flag in zion.h */
-#ifdef DEBUG
 #define sm_debug(...) \
 	do {              \
 		sbi_printf(__VA_ARGS__); \
 	} while (0)
+#define tee_log(...) \
+	do {              \
+		sbi_printf(__VA_ARGS__); \
+	} while (0)
 #else
+#define zion_printf(...) \
+	do {                 \
+	} while (0)
 #define sm_debug(...) \
+	do {              \
+	} while (0)
+#define tee_log(...) \
 	do {              \
 	} while (0)
 #endif

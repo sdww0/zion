@@ -369,11 +369,11 @@ static bool translate_hpa_at_level(uintptr_t root_pt, unsigned long mode,
 
 	if (!pte_is_valid(pte)) {
 		if (pte) {
-			sbi_printf(
+			tee_log(
 				"[SM] TEE security check: No translation in %s page, pte: %lx\n",
 				page_name, *pte);
 		} else {
-			sbi_printf(
+			tee_log(
 				"[SM] TEE security check: No translation in %s page\n",
 				page_name);
 		}
@@ -415,12 +415,12 @@ static void report_smm_region_access(uint64_t hpa, unsigned long mtval)
 	uint64_t vcpu_end = (uint64_t)(&(tee_threads[MAX_TEE_THREADS]) +
 				       sizeof(struct tee_thread));
 
-	sbi_printf(
+	tee_log(
 		"[SM] TEE security check: The hypervisor is trying to access the SM region\n");
 
 	hpa += mtval & ZION_4K_PAGE_OFFSET_MASK;
 	if (address_in_range(hpa, vcpu_start, vcpu_end)) {
-		sbi_printf(
+		tee_log(
 			"[SM] TEE security check: The hypervisor is trying to access the vCPU region\n");
 	}
 }
@@ -439,26 +439,26 @@ static void report_protected_region_access(uint64_t hpa, unsigned long mcause)
 		return;
 	}
 
-	sbi_printf(
+	tee_log(
 		"[SM] TEE security check: the hypervisor is trying to r/w the protected region\n");
-	sbi_printf("[SM] TEE security check: The physical address: %lx\n", hpa);
+	tee_log("[SM] TEE security check: The physical address: %lx\n", hpa);
 
 	if (address_in_range(hpa, protection_start, page_table_end)) {
 		if (mcause == CAUSE_LOAD_ACCESS) {
-			sbi_printf(
+			tee_log(
 				"[SM] TEE security check: The hypervisor is trying to read the page table region\n");
 		} else if (mcause == CAUSE_STORE_ACCESS) {
-			sbi_printf(
+			tee_log(
 				"[SM] TEE security check: The hypervisor is trying to write the page table region\n");
 		}
 		return;
 	}
 
 	if (mcause == CAUSE_LOAD_ACCESS) {
-		sbi_printf(
+		tee_log(
 			"[SM] TEE security check: The hypervisor is trying to read the CVM private memory\n");
 	} else if (mcause == CAUSE_STORE_ACCESS) {
-		sbi_printf(
+		tee_log(
 			"[SM] TEE security check: The hypervisor is trying to write the CVM private memory\n");
 	}
 }
@@ -502,7 +502,7 @@ void tee_security_check(unsigned long mtval, unsigned long mcause,
 	unsigned long mode = (raw_root_pt >> ZION_SATP_MODE_SHIFT) &
 			      ZION_SATP_MODE_MASK;
 
-	sbi_printf(
+	tee_log(
 		"[SM] TEE security check: Info: mtval=%lx, mcause=%lx, root_pt: %lx, mode: %lx\n",
 		mtval, mcause, root_pt, mode);
 
@@ -511,7 +511,7 @@ void tee_security_check(unsigned long mtval, unsigned long mcause,
 
 	if (!resolve_hpa_for_security_check(root_pt, mode, mtval, &hpa, &pte))
 		return;
-	sbi_printf("[SM] The hpa: 0x%lx, with permission: %lx\n", hpa,
+	tee_log("[SM] The hpa: 0x%lx, with permission: %lx\n", hpa,
 		   *pte & ZION_PTE_FLAG_MASK);
 
 	uint64_t smm_start = SMM_BASE;

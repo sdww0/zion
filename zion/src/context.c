@@ -138,7 +138,7 @@ static bool sanitize_guest_saved_reg(const char *reg_name,
 	 * builds avoid printing it because stale shared values are not the PMP
 	 * access-control signal we care about.
 	 */
-	sbi_printf("[SM] TEE security check: %s register mismatch, value: %lx\n",
+	tee_log("[SM] TEE security check: %s register mismatch, value: %lx\n",
 		   reg_name, *reg_value);
 #else
 	(void)reg_name;
@@ -272,7 +272,7 @@ static inline void put_cvm_status_to_ree(struct sbi_trap_regs *regs,
 	default:
 		if (exit_cause != CVM_EXIT_INTERRUPT &&
 		    exit_cause != CVM_EXIT_SHARED_MEM_PAGE_FAULT) {
-			sbi_printf(
+			tee_log(
 				"[SM] !!!ERROR!!! in put_cvm_status_to_ree(), exit_cause=%u\n",
 				(unsigned int)exit_cause);
 		}

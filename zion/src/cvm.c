@@ -222,7 +222,7 @@ unsigned long init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 		cvms[rtid].ttid_next--;
 		vcpu->tthread = NULL;
 		tee_thread_free(tthread);
-		sbi_printf(
+		tee_log(
 			"[SBI] !!!ERROR!!! in tvm_vcpu_init(): copy_to_sm()\n");
 		sbi_hart_hang();
 		return -1;
@@ -250,7 +250,7 @@ unsigned long init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 
 	init_guest_csrs(&vcpu->tthread->csrs, mstatus, cvms[rtid].hgatp);
 
-	sbi_printf("[SM] CVM vcpu: tid=%u, rtid=%u, ttid=%u\n",
+	tee_log("[SM] CVM vcpu: tid=%u, rtid=%u, ttid=%u\n",
 		   tid, rtid, ttid);
 	return 0;
 }
@@ -347,7 +347,7 @@ void set_cvm_mem_info(unsigned int tid, struct cvm_mem_info *mem_info)
 
 	*dest = *mem_info;
 
-	sbi_printf("[SM] CVM mem: tid=%u, slot=%u, gpa=0x%lx, size=0x%lx, private=%u\n",
+	tee_log("[SM] CVM mem: tid=%u, slot=%u, gpa=0x%lx, size=0x%lx, private=%u\n",
 		   tid, dest->slot, dest->guest_phys_addr, dest->memory_size,
 		   dest->private);
 }

@@ -5,6 +5,7 @@
 #include "ipi.h"
 #include "sm.h"
 #include "pmp.h"
+#include "zion.h"
 #include <crypto.h>
 #include "enclave.h"
 #include "platform-hook.h"
@@ -84,9 +85,9 @@ static void sm_print_hash(void)
 {
   for (int i=0; i<MDSIZE; i++)
   {
-    sbi_printf("%02x", (char) sm_hash[i]);
+    tee_log("%02x", (char) sm_hash[i]);
   }
-  sbi_printf("\n");
+  tee_log("\n");
 }
 
 /*
@@ -120,7 +121,7 @@ void sm_init(bool cold_boot)
 	// initialize SMM
   if (cold_boot) {
     /* only the cold-booting hart will execute these */
-    sbi_printf("[SM] Initializing ... hart [%lx]\n", csr_read(mhartid));
+    tee_log("[SM] Initializing ... hart [%lx]\n", csr_read(mhartid));
 
     sbi_ecall_register_extension(&ecall_keystone_enclave);
 
@@ -137,7 +138,7 @@ void sm_init(bool cold_boot)
     }
 
     if (platform_init_global_once() != SBI_ERR_SM_ENCLAVE_SUCCESS) {
-      sbi_printf("[SM] platform global init fatal error");
+      tee_log("[SM] platform global init fatal error");
       sbi_hart_hang();
     }
     // Copy the keypair from the root of trust
@@ -163,11 +164,11 @@ void sm_init(bool cold_boot)
 
   /* Fire platform specific global init */
   if (platform_init_global() != SBI_ERR_SM_ENCLAVE_SUCCESS) {
-    sbi_printf("[SM] platform global init fatal error");
+    tee_log("[SM] platform global init fatal error");
     sbi_hart_hang();
   }
 
-  sbi_printf("[SM] Keystone security monitor has been initialized!\n");
+  tee_log("[SM] Keystone security monitor has been initialized!\n");
 
   sm_print_hash();
 

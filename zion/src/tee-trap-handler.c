@@ -25,7 +25,7 @@
 /* Enclave path debug logging — comment out to silence */
 #define ENCLAVE_LOG
 #ifdef ENCLAVE_LOG
-#define encl_printf(...) sbi_printf(__VA_ARGS__)
+#define encl_printf(...) tee_log(__VA_ARGS__)
 #else
 #define encl_printf(...) do {} while (0)
 #endif
@@ -36,49 +36,49 @@ static void sbi_trap_error(const char *msg, int rc, ulong mcause, ulong mtval,
 {
 	u32 hartid = current_hartid();
 
-	sbi_printf("[SBI] sbi_trap_error()!!!\n");
+	tee_log("[SBI] sbi_trap_error()!!!\n");
 
-	sbi_printf("%s: hart%d: %s (error %d)\n", __func__, hartid, msg, rc);
-	sbi_printf("%s: hart%d: mcause=0x%" PRILX " mtval=0x%" PRILX "\n",
+	tee_log("%s: hart%d: %s (error %d)\n", __func__, hartid, msg, rc);
+	tee_log("%s: hart%d: mcause=0x%" PRILX " mtval=0x%" PRILX "\n",
 		   __func__, hartid, mcause, mtval);
 	if (misa_extension('H')) {
-		sbi_printf("%s: hart%d: mtval2=0x%" PRILX " mtinst=0x%" PRILX
+		tee_log("%s: hart%d: mtval2=0x%" PRILX " mtinst=0x%" PRILX
 			   "\n",
 			   __func__, hartid, mtval2, mtinst);
 	}
-	sbi_printf("%s: hart%d: mepc=0x%" PRILX " mstatus=0x%" PRILX "\n",
+	tee_log("%s: hart%d: mepc=0x%" PRILX " mstatus=0x%" PRILX "\n",
 		   __func__, hartid, regs->mepc, regs->mstatus);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "ra", regs->ra, "sp", regs->sp);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "gp", regs->gp, "tp", regs->tp);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "s0", regs->s0, "s1", regs->s1);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "a0", regs->a0, "a1", regs->a1);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "a2", regs->a2, "a3", regs->a3);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "a4", regs->a4, "a5", regs->a5);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "a6", regs->a6, "a7", regs->a7);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "s2", regs->s2, "s3", regs->s3);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "s4", regs->s4, "s5", regs->s5);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "s6", regs->s6, "s7", regs->s7);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "s8", regs->s8, "s9", regs->s9);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "s10", regs->s10, "s11", regs->s11);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "t0", regs->t0, "t1", regs->t1);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "t2", regs->t2, "t3", regs->t3);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
+	tee_log("%s: hart%d: %s=0x%" PRILX " %s=0x%" PRILX "\n", __func__,
 		   hartid, "t4", regs->t4, "t5", regs->t5);
-	sbi_printf("%s: hart%d: %s=0x%" PRILX "\n", __func__, hartid, "t6",
+	tee_log("%s: hart%d: %s=0x%" PRILX "\n", __func__, hartid, "t6",
 		   regs->t6);
 
 	sbi_hart_hang();
@@ -296,7 +296,7 @@ static int handle_access_or_vs_ecall(struct sbi_trap_context *tcntx,
 
 	if (regs->a7 == SBI_EXT_DBCN &&
 	    regs->a6 == SBI_EXT_DBCN_CONSOLE_WRITE_BYTE) {
-		sbi_printf("%c", (char)regs->a0);
+		tee_log("%c", (char)regs->a0);
 	}
 
 	deliver_trap_to_ree(regs->mepc, mcause, trap);
@@ -327,7 +327,7 @@ static int fetch_guest_fault_insn(struct sbi_trap_regs *regs,
 	*insn = sbi_get_insn(regs->mepc, &utrap);
 	*insn_len = INSN_LEN(*insn);
 	if (utrap.cause) {
-		sbi_printf(
+		tee_log(
 			"[SM] cvm_trap_handler: cannot get the insn, cause: %lu, insn: 0x%lx\n",
 			utrap.cause, *insn);
 		return SBI_ENOTSUPP;
@@ -350,7 +350,7 @@ static void fill_mmio_exit_reg(struct exit_mmio_reg *exit_mmio_reg,
 		exit_mmio_reg->rd_offset =
 			decode_mmio_load_rd_offset(insn, insn_len);
 	} else {
-		sbi_printf("[SM] MMIO FAULT: insn=%lx, insn_len=%lx\n", insn,
+		tee_log("[SM] MMIO FAULT: insn=%lx, insn_len=%lx\n", insn,
 			   insn_len);
 	}
 }
@@ -381,12 +381,12 @@ static int handle_guest_page_fault(struct sbi_trap_regs *regs,
 				 cvm_mem_info->memory_size) {
 		if (map_gpa_to_hpa(&g_mem_pool, rtid, fault_addr, 0, BLOCK_SIZE,
 				   IS_HUGE_PAGE, false)) {
-			sbi_printf(
+			tee_log(
 				"[SBI] cvm_trap_handler(): Failed to map 2MB block\n");
-			sbi_printf(
+			tee_log(
 				"[SBI] cvm_trap_handler(): rtid=%u, fault_addr=0x%lx\n",
 				rtid, fault_addr);
-			sbi_printf("memory pool info: total_count=%d, free_count=%d\n",
+			tee_log("memory pool info: total_count=%d, free_count=%d\n",
 				   g_mem_pool.data_pool.total_count,
 				   g_mem_pool.data_pool.free_count);
 			return -1;
@@ -435,7 +435,7 @@ static int handle_virtual_inst_fault(struct sbi_trap_regs *regs,
 		unsigned long insn = sbi_get_insn(regs->mepc, &utrap);
 
 		if (utrap.cause) {
-			sbi_printf(
+			tee_log(
 				"[SM] cvm_trap_handler: CAUSE_VIRTUAL_INST_FAULT, cause: %lu\n",
 				utrap.cause);
 			return SBI_ENOTSUPP;
@@ -467,7 +467,7 @@ struct sbi_trap_context *cvm_trap_handler(struct sbi_trap_context *tcntx)
 
 	if (!(regs->mstatus & MSTATUS_MPV)) {
 		/* Previous privilege level is not in virtualization mode. */
-		sbi_printf(
+		tee_log(
 			"[SM] !!!ERROR!!! cvm_trap: mepc=%lx mcause=%lx mstatus=%lx\n",
 			regs->mepc, mcause, regs->mstatus);
 		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
@@ -696,24 +696,33 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			rc = sbi_ecall_handler(tcntx);
 		} else if (regs->a7 == SBI_EXT_0_1_CONSOLE_PUTCHAR) {
 			/* Eyrie legacy putchar: a0 = character */
-			sbi_printf("%c", (char)regs->a0);
+			tee_log("%c", (char)regs->a0);
 			regs->mepc += 4;
 			rc = 0;
 		} else if (regs->a7 == SBI_EXT_DBCN &&
 			   regs->a6 == SBI_EXT_DBCN_CONSOLE_WRITE_BYTE) {
-			sbi_printf("%c", (char)regs->a0);
+			tee_log("%c", (char)regs->a0);
 			regs->mepc += 4;
 			rc = 0;
 		} else if (regs->a7 == 1111) {
 			/* Runtime not_implemented_fatal: a0 = scause of original fault.
-			 * Dump translation for the faulting addresses. */
+			 * Read VSEPC/VSTVAL to get the original fault address
+			 * (the runtime trap handler saved context but didn't
+			 * modify these CSRs before doing ecall). */
+			uintptr_t orig_sepc  = csr_read(CSR_VSEPC);
+			uintptr_t orig_stval = csr_read(CSR_VSTVAL);
 			sbi_printf("[SM] === Runtime FATAL: a7=1111 a0(scause)=0x%lx sepc=0x%lx ===\n",
 				   regs->a0, regs->mepc);
-			sbi_printf("[SM] Dumping translations for key addresses:\n");
-			dump_translation(0x1000);   /* eapp's first page (fault addr) */
-			dump_translation(0x100c);   /* actual fault address from log */
-			dump_translation(0x100e8);  /* eapp entry point */
-			dump_translation(0x10000);  /* eapp .text base (from ELF) */
+			sbi_printf("[SM]   original fault: vsepc=0x%lx vstval=0x%lx vsatp=0x%lx\n",
+				   orig_sepc, orig_stval, csr_read(CSR_VSATP));
+			sbi_printf("[SM] Dumping translations for fault address:\n");
+			dump_translation(orig_sepc);
+			dump_translation(orig_stval);
+			/* Also dump eapp code page for comparison */
+			sbi_printf("[SM] Dumping eapp code page:\n");
+			dump_translation(0x1000);
+			dump_translation(0x2000);
+			dump_translation(0x3000);
 			sbi_printf("[SM] === End FATAL dump, exiting enclave ===\n");
 			regs->mepc += 4;
 			deliver_trap_to_ree(regs->mepc - 4, mcause, trap);
@@ -722,11 +731,11 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		} else {
 			/* Forward standard SBI ecalls to OpenSBI handler.
 			 * sbi_ecall_handler handles mepc internally. */
-			sbi_printf("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx sepc=0x%lx a0=0x%lx\n",
+			tee_log("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx sepc=0x%lx a0=0x%lx\n",
 				   regs->a7, regs->a6, regs->mepc, regs->a0);
 			rc = sbi_ecall_handler(tcntx);
 			if (rc) {
-				sbi_printf("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",
+				tee_log("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",
 					   regs->a7, rc);
 				/* Unknown/failed ecall: exit enclave to host */
 				regs->mepc += 4;

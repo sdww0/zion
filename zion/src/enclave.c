@@ -87,7 +87,7 @@ static uint64_t setup_enclave_vsatp(struct runtime_params_t *p)
 	va_l3[511] = VS_LEAF_PTE(rt_mega, leaf);
 
 	uint64_t vsatp = SATP_MODE_SV48 | ((uint64_t)root_pt >> PAGE_SHIFT);
-	sbi_printf("[SM] vsatp: root=0x%lx runtime=0x%lx id[%lu] vsatp=0x%lx\n",
+	tee_log("[SM] vsatp: root=0x%lx runtime=0x%lx id[%lu] vsatp=0x%lx\n",
 		   root_pt, p->runtime_base, id_vpn2, vsatp);
 	return vsatp;
 }
@@ -256,12 +256,12 @@ static void setup_enclave_thread(struct tee_thread *thread,
 	 * No MPIE/SIE — enclave starts with interrupts off (Eyrie sets them up). */
 	thread->csrs.mepc = entry_point;
 	thread->csrs.mstatus = (PRV_S << MSTATUS_MPP_SHIFT) |
-			       MSTATUS_MPV;
+			       MSTATUS_MPV | SSTATUS_FS;
 	thread->csrs.hstatus = HSTATUS_SPV | HSTATUS_VSXL;
 	thread->csrs.hcounteren = 0x7; /* enable cycle/time/inst counters */
 	thread->csrs.hgatp = enc->hgatp;
 	thread->csrs.vsatp = 0; /* no S-mode page table initially */
-	thread->csrs.vsstatus = SSTATUS_SUM; /* allow S-mode to access U-mode pages */
+	thread->csrs.vsstatus = SSTATUS_SUM; /* allow S-mode to access U-mode pages; FP set by runtime */
 	thread->csrs.vstvec = 0;
 	thread->csrs.vsscratch = 0;
 	thread->csrs.vsepc = 0;
@@ -337,7 +337,7 @@ unsigned long create_enclave(unsigned long *eidptr,
 	for (int i = 0; i < n_blocks; i++) {
 		uint64_t pa = alloc_data_block(&g_mem_pool.data_pool, eid);
 		if (pa == (uint64_t)-1) {
-			sbi_printf("[SM] create_enclave: eid=%d alloc block %d failed\n",
+			tee_log("[SM] create_enclave: eid=%d alloc block %d failed\n",
 				   eid, i);
 			ret = SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
 			goto free_blocks;
@@ -346,28 +346,28 @@ unsigned long create_enclave(unsigned long *eidptr,
 	}
 
 	/* ---- Copy EPM content from driver-allocated PA → secure pool ---- */
-	sbi_printf("[SM] create_enclave: EPM copy: epm_pa=0x%lx n_blocks=%d block_size=0x%lx\n",
+	tee_log("[SM] create_enclave: EPM copy: epm_pa=0x%lx n_blocks=%d block_size=0x%lx\n",
 		   epm_pa, n_blocks, BLOCK_SIZE);
 	/* GPA may not be BLOCK_SIZE-aligned (2MB). map_gpa_to_hpa uses megapages,
 	 * which auto-align to 2MB. Data must go to the correct offset within
 	 * the megapage: block_base + (epm_pa % BLOCK_SIZE). */
 	uintptr_t gpa_offset = epm_pa & (BLOCK_SIZE - 1);
-	sbi_printf("[SM]   gpa_offset=0x%lx within megapage\n", gpa_offset);
+	tee_log("[SM]   gpa_offset=0x%lx within megapage\n", gpa_offset);
 	for (int i = 0; i < n_blocks; i++) {
 		size_t chunk = (i == n_blocks - 1) ?
 			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
 		uintptr_t src = epm_pa + i * BLOCK_SIZE;
 		/* dst must account for GPA offset within the 2MB megapage */
 		uintptr_t dst = epm_blocks[i] + gpa_offset;
-		sbi_printf("[SM]   block[%d]: src=0x%lx dst=0x%lx chunk=0x%lx\n",
+		tee_log("[SM]   block[%d]: src=0x%lx dst=0x%lx chunk=0x%lx\n",
 			   i, src, dst, chunk);
-		sbi_printf("[SM]   src[0..3]: %08x %08x %08x %08x\n",
+		tee_log("[SM]   src[0..3]: %08x %08x %08x %08x\n",
 			   ((volatile uint32_t *)src)[0],
 			   ((volatile uint32_t *)src)[1],
 			   ((volatile uint32_t *)src)[2],
 			   ((volatile uint32_t *)src)[3]);
 		sbi_memcpy((void *)dst, (void *)src, chunk);
-		sbi_printf("[SM]   dst[0..3]: %08x %08x %08x %08x\n",
+		tee_log("[SM]   dst[0..3]: %08x %08x %08x %08x\n",
 			   ((volatile uint32_t *)dst)[0],
 			   ((volatile uint32_t *)dst)[1],
 			   ((volatile uint32_t *)dst)[2],
@@ -405,7 +405,7 @@ unsigned long create_enclave(unsigned long *eidptr,
 		 (HGATP_MODE_SV48X4 << HGATP_MODE_SHIFT);
 
 	/* ---- Verify G-stage mapping ---- */
-	sbi_printf("[SM] create_enclave: G-stage verification (root_pt=0x%lx):\n",
+	tee_log("[SM] create_enclave: G-stage verification (root_pt=0x%lx):\n",
 		   (unsigned long)root_pt);
 	for (int i = 0; i < n_blocks; i++) {
 		uint64_t gpa = epm_pa + (uint64_t)i * BLOCK_SIZE;
@@ -420,7 +420,7 @@ unsigned long create_enclave(unsigned long *eidptr,
 				idx = (gpa >> (12 + lvl * 9)) & 0x1FF;
 			pte = pt[idx];
 			if (!(pte & PTE_V)) {
-				sbi_printf("[SM]   G L%d[%lu] INVALID\n", lvl, idx);
+				tee_log("[SM]   G L%d[%lu] INVALID\n", lvl, idx);
 				break;
 			}
 			pt = (pte_t *)(((pte >> 10) & 0xFFFFFFFFFFFULL) << 12);
@@ -429,11 +429,11 @@ unsigned long create_enclave(unsigned long *eidptr,
 			uint64_t idx = (gpa >> 12) & 0x1FF;
 			pte = pt[idx];
 			uint64_t hpa = ((pte >> 10) & 0xFFFFFFFFFFFULL) << 12;
-			sbi_printf("[SM]   GPA 0x%lx → HPA 0x%lx (pte=0x%lx)\n",
+			tee_log("[SM]   GPA 0x%lx → HPA 0x%lx (pte=0x%lx)\n",
 				   gpa, hpa, (unsigned long)pte);
 		}
 	}
-	sbi_printf("[SM] create_enclave: dram_base=0x%lx user_paddr=0x%lx runtime_paddr=0x%lx\n",
+	tee_log("[SM] create_enclave: dram_base=0x%lx user_paddr=0x%lx runtime_paddr=0x%lx\n",
 		   epm_pa, create_args.user_paddr, create_args.runtime_paddr);
 
 	/* ---- Fill enclave metadata ---- */
@@ -472,7 +472,7 @@ unsigned long create_enclave(unsigned long *eidptr,
 	spin_unlock(&encl_lock);
 
 	*eidptr = eid;
-	sbi_printf("[SM] create_enclave: eid=%d epm_gpa=0x%lx size=0x%lx hgatp=0x%lx\n",
+	tee_log("[SM] create_enclave: eid=%d epm_gpa=0x%lx size=0x%lx hgatp=0x%lx\n",
 		   eid, epm_pa, epm_size, hgatp);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 
@@ -511,7 +511,7 @@ unsigned long destroy_enclave(enclave_id eid)
 	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
 
 	encl_free_eid(eid);
-	sbi_printf("[SM] destroy_enclave: eid=%d destroyed\n", eid);
+	tee_log("[SM] destroy_enclave: eid=%d destroyed\n", eid);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
@@ -544,37 +544,37 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	uintptr_t sp = p->free_base + p->free_requested; /* stack at top of free */
 	uintptr_t arg0 = p->dram_base; /* Eyrie expects dram_base in a0 */
 
-	sbi_printf("[SM] run_enclave: eid=%d entry=0x%lx dram_base=0x%lx runtime=0x%lx\n",
+	tee_log("[SM] run_enclave: eid=%d entry=0x%lx dram_base=0x%lx runtime=0x%lx\n",
 		   eid, entry, p->dram_base, p->runtime_base);
-	sbi_printf("[SM]   dram_size=0x%lx user=0x%lx free=0x%lx utm=0x%lx\n",
+	tee_log("[SM]   dram_size=0x%lx user=0x%lx free=0x%lx utm=0x%lx\n",
 		   p->dram_size, p->user_base, p->free_base, p->untrusted_base);
 
 	setup_enclave_thread(thread, &enclaves[eid], entry, sp, arg0, eid);
 
-	sbi_printf("[SM] ===== ENCLAVE FIRST ENTRY =====\n");
-	sbi_printf("[SM] CSRs: mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
+	tee_log("[SM] ===== ENCLAVE FIRST ENTRY =====\n");
+	tee_log("[SM] CSRs: mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
 		   thread->csrs.mepc, thread->csrs.mstatus, thread->csrs.hstatus);
-	sbi_printf("[SM] CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx vsstatus=0x%lx\n",
+	tee_log("[SM] CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx vsstatus=0x%lx\n",
 		   thread->csrs.hgatp, thread->csrs.hcounteren,
 		   thread->csrs.vsatp, thread->csrs.vsstatus);
-	sbi_printf("[SM] CSRs: vstvec=0x%lx vsscratch=0x%lx vsepc=0x%lx vscause=0x%lx\n",
+	tee_log("[SM] CSRs: vstvec=0x%lx vsscratch=0x%lx vsepc=0x%lx vscause=0x%lx\n",
 		   thread->csrs.vstvec, thread->csrs.vsscratch,
 		   thread->csrs.vsepc, thread->csrs.vscause);
-	sbi_printf("[SM] GPRs: sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx\n",
+	tee_log("[SM] GPRs: sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx\n",
 		   thread->gprs.sp, thread->gprs.a0,
 		   thread->gprs.a1, thread->gprs.a2);
-	sbi_printf("[SM] GPRs: a3=0x%lx a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+	tee_log("[SM] GPRs: a3=0x%lx a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
 		   thread->gprs.a3, thread->gprs.a4, thread->gprs.a5,
 		   thread->gprs.a6, thread->gprs.a7);
-	sbi_printf("[SM] Params: dram=0x%lx size=0x%lx runtime=0x%lx user=0x%lx\n",
+	tee_log("[SM] Params: dram=0x%lx size=0x%lx runtime=0x%lx user=0x%lx\n",
 		   p->dram_base, p->dram_size, p->runtime_base, p->user_base);
-	sbi_printf("[SM] Params: free=0x%lx utm=0x%lx utm_size=0x%lx\n",
+	tee_log("[SM] Params: free=0x%lx utm=0x%lx utm_size=0x%lx\n",
 		   p->free_base, p->untrusted_base, p->untrusted_size);
-	sbi_printf("[SM] =================================\n");
+	tee_log("[SM] =================================\n");
 
 	enclaves[eid].active_thread = thread;
 	cpu_enter_enclave_context(eid);
-	sbi_printf("[SM] run_enclave: eid=%d entry=0x%lx sp=0x%lx\n",
+	tee_log("[SM] run_enclave: eid=%d entry=0x%lx sp=0x%lx\n",
 		   eid, entry, sp);
 
 	/*
@@ -592,38 +592,38 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 			  REE_TO_ENCLAVE,
 			  0, NULL, NULL);
 
-	sbi_printf("[SM] entering enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
+	tee_log("[SM] entering enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
 		   regs->mepc, regs->mstatus);
 
-	sbi_printf("[SM] ===== REE->ENCLAVE REG DUMP =====\n");
-	sbi_printf("[SM]   mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu sie=%lu\n",
+	tee_log("[SM] ===== REE->ENCLAVE REG DUMP =====\n");
+	tee_log("[SM]   mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu sie=%lu\n",
 		   regs->mepc, regs->mstatus,
 		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
 		   (regs->mstatus & MSTATUS_MPV) >> 39,
 		   (regs->mstatus & MSTATUS_SIE) >> 1);
-	sbi_printf("[SM]   hgatp=0x%lx hstatus=0x%lx mtvec=0x%lx\n",
+	tee_log("[SM]   hgatp=0x%lx hstatus=0x%lx mtvec=0x%lx\n",
 		   csr_read(CSR_HGATP), csr_read(CSR_HSTATUS),
 		   csr_read(CSR_MTVEC));
-	sbi_printf("[SM]   medeleg=0x%lx mideleg=0x%lx mie=0x%lx\n",
+	tee_log("[SM]   medeleg=0x%lx mideleg=0x%lx mie=0x%lx\n",
 		   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG),
 		   csr_read(CSR_MIE));
-	sbi_printf("[SM]   hideleg=0x%lx hedeleg=0x%lx\n",
+	tee_log("[SM]   hideleg=0x%lx hedeleg=0x%lx\n",
 		   csr_read(CSR_HIDELEG), csr_read(CSR_HEDELEG));
-	sbi_printf("[SM]   satp=0x%lx sscratch=0x%lx stvec=0x%lx\n",
+	tee_log("[SM]   satp=0x%lx sscratch=0x%lx stvec=0x%lx\n",
 		   csr_read(CSR_SATP), csr_read(CSR_SSCRATCH),
 		   csr_read(CSR_STVEC));
-	sbi_printf("[SM]   vsstatus=0x%lx vsatp=0x%lx vstvec=0x%lx\n",
+	tee_log("[SM]   vsstatus=0x%lx vsatp=0x%lx vstvec=0x%lx\n",
 		   csr_read(CSR_VSSTATUS), csr_read(CSR_VSATP),
 		   csr_read(CSR_VSTVEC));
-	sbi_printf("[SM]   GPRs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+	tee_log("[SM]   GPRs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
 		   regs->a0, regs->a1, regs->a2, regs->a3);
-	sbi_printf("[SM]   GPRs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+	tee_log("[SM]   GPRs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
 		   regs->a4, regs->a5, regs->a6, regs->a7);
-	sbi_printf("[SM]   GPRs: sp=0x%lx ra=0x%lx gp=0x%lx tp=0x%lx\n",
+	tee_log("[SM]   GPRs: sp=0x%lx ra=0x%lx gp=0x%lx tp=0x%lx\n",
 		   regs->sp, regs->ra, regs->gp, regs->tp);
-	sbi_printf("[SM]   GPRs: t0=0x%lx t1=0x%lx t2=0x%lx s0=0x%lx\n",
+	tee_log("[SM]   GPRs: t0=0x%lx t1=0x%lx t2=0x%lx s0=0x%lx\n",
 		   regs->t0, regs->t1, regs->t2, regs->s0);
-	sbi_printf("[SM] ===== REE->ENCLAVE DUMP END =====\n");
+	tee_log("[SM] ===== REE->ENCLAVE DUMP END =====\n");
 
 	/* Direct mret — bypass OpenSBI sbi_trap_exit which clears MPV.
 	 * context_switch_to already set all CSRs (hstatus, hgatp, mtvec).
@@ -741,7 +741,7 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	thread->gprs.a0 = p->dram_base;
 
 	cpu_enter_enclave_context(eid);
-	sbi_printf("[SM] resume_enclave: eid=%d mepc=0x%lx\n",
+	tee_log("[SM] resume_enclave: eid=%d mepc=0x%lx\n",
 		   eid, thread->csrs.mepc);
 
 	context_switch_to(regs, &tee_threads[0], thread,
@@ -749,7 +749,7 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
 	/* Direct mret into enclave — same as run_enclave.
 	 * MUST bypass OpenSBI sbi_trap_exit which clears MPV. */
-	sbi_printf("[SM] resuming enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
+	tee_log("[SM] resuming enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
 		   regs->mepc, regs->mstatus);
 	tee_mret(regs);
 	__builtin_unreachable();
@@ -760,7 +760,7 @@ unsigned long attest_enclave(uintptr_t report_ptr, uintptr_t data,
 			     uintptr_t size, enclave_id eid)
 {
 	/* TODO: implement full attestation */
-	sbi_printf("[SM] attest_enclave: eid=%d (stub)\n", eid);
+	tee_log("[SM] attest_enclave: eid=%d (stub)\n", eid);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
@@ -768,7 +768,7 @@ unsigned long get_sealing_key(uintptr_t sealing_key, uintptr_t key_ident,
 			      size_t key_ident_size, enclave_id eid)
 {
 	/* TODO: implement sealing key derivation */
-	sbi_printf("[SM] get_sealing_key: eid=%d (stub)\n", eid);
+	tee_log("[SM] get_sealing_key: eid=%d (stub)\n", eid);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
@@ -805,31 +805,37 @@ unsigned long sbi_sm_run_enclave(struct sbi_trap_regs *regs,
 unsigned long sbi_sm_resume_enclave(struct sbi_trap_regs *regs,
 				    unsigned long eid)
 {
-	return resume_enclave(regs, (enclave_id)eid);
+	unsigned long ret = resume_enclave(regs, (enclave_id)eid);
 	/* On success, resume_enclave calls tee_mret and never returns.
-	 * On failure, it returns an error code to the host. */
+	 * On failure, return error to host via tee_mret (same as stop_enclave). */
+	regs->a0 = ret;
+	regs->mepc += 4;
+	tee_mret(regs);
+	__builtin_unreachable();
+	return 0;
 }
 
 unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
 				  unsigned long retval)
 {
 	enclave_id eid = (enclave_id)cpu_get_enclave_id();
-	unsigned long ret = exit_enclave(regs, eid);
-	/* Do NOT set regs->a0/a1 here — sbi_ecall_handler will
-	 * overwrite them.  Use out->value instead (set in
-	 * sbi_ecall_tee_handler) so host sees a0=0, a1=retval. */
-	(void)ret;
-	return retval;
+	regs->a0 = exit_enclave(regs, eid);
+	regs->a1 = retval;
+	regs->mepc += 4;
+	tee_mret(regs);
+	__builtin_unreachable();
+	return 0;
 }
 
 unsigned long sbi_sm_stop_enclave(struct sbi_trap_regs *regs,
 				  unsigned long request)
 {
 	enclave_id eid = (enclave_id)cpu_get_enclave_id();
-	unsigned long ret = stop_enclave(regs, request, eid);
-	/* Do NOT set regs->a0 here — sbi_ecall_handler will overwrite.
-	 * Return ret (0=success) so sbi_ecall_handler sets a0=0. */
-	return ret;
+	regs->a0 = stop_enclave(regs, request, eid);
+	regs->mepc += 4;
+	tee_mret(regs);
+	__builtin_unreachable();
+	return 0;
 }
 
 unsigned long sbi_sm_attest_enclave(uintptr_t report, uintptr_t data,

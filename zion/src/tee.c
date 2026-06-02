@@ -76,7 +76,7 @@ static int resolve_load_mem_block(unsigned int d_rtid, pte_t *root_pt,
 			*block_hpa, gpa);
 		if (map_gpa_to_hpa(&g_mem_pool, d_rtid, gpa, *block_hpa,
 				   BLOCK_SIZE, IS_HUGE_PAGE, false) != 0) {
-			sbi_printf(
+			tee_log(
 				"[SBI] !!!ERROR!!! in load_mem(): Failed to map 2MB block\n");
 			return -1;
 		}
@@ -149,19 +149,19 @@ void set_inited(unsigned int tid)
 unsigned long reserve_mem(unsigned long base, unsigned long count)
 {
 	unsigned long size = count << PAGE_SHIFT;
-	sbi_printf("[SBI] reserve_mem(): base=0x%lx, count=0x%lx, size=0x%lx\n",
+	tee_log("[SBI] reserve_mem(): base=0x%lx, count=0x%lx, size=0x%lx\n",
 		   base, count, size);
 	int ret = tee_mem_init((uint8_t *)base, (uint32_t)count);
-	sbi_printf("[SBI] reserve_mem(): tee_mem_init() ret=%d\n", ret);
+	tee_log("[SBI] reserve_mem(): tee_mem_init() ret=%d\n", ret);
 	if (ret) {
-		sbi_printf("[SBI] reserve_mem(): tee_mem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
+		tee_log("[SBI] reserve_mem(): tee_mem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
 			   base, count, ret);
 		return ret;
 	}
 
 	tee_region_id = teem_init(base, size);
 	if (tee_region_id < 0) {
-		sbi_printf("[SBI] reserve_mem(): teem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
+		tee_log("[SBI] reserve_mem(): teem_init() failed, base=0x%lx, count=0x%lx, ret=%d\n",
 			   base, count, tee_region_id);
 		return tee_region_id;
 	}
@@ -172,7 +172,7 @@ unsigned long reserve_mem(unsigned long base, unsigned long count)
 	 * PMP locking can be re-added once the memory region is guaranteed
 	 * to be completely free of kernel data.
 	 */
-	sbi_printf("[SBI] reserve_mem(): pool ready, region=%d, addr=0x%lx, size=0x%lx\n",
+	tee_log("[SBI] reserve_mem(): pool ready, region=%d, addr=0x%lx, size=0x%lx\n",
 		   tee_region_id, (unsigned long)pmp_region_get_addr(tee_region_id),
 		   (unsigned long)pmp_region_get_size(tee_region_id));
 	return 0;
@@ -238,7 +238,7 @@ unsigned long load_mem(unsigned int d_rtid, struct sbi_load_mem *p)
 			trim_load_mem_chunk_to_block(gpa, &block_hpa, load_size);
 		if (copy_load_mem_chunk(block_hpa, p->stash, cursor, load_size) !=
 		    0) {
-			sbi_printf(
+			tee_log(
 				"[SBI] !!!ERROR!!! in load_mem(): copy block, stash=%lx, pos=%lx\n",
 				p->stash, p->pos);
 			return -1;
@@ -258,7 +258,7 @@ int teem_init(uintptr_t start, unsigned long size)
 	int region = -1;
 	int ret = pmp_region_init_atomic(start, size, PMP_PRI_ANY, &region, 0);
 	if (ret) {
-		sbi_printf("[SBI] teem_init(): pmp_region_init_atomic() failed, ret=%d\n",
+		tee_log("[SBI] teem_init(): pmp_region_init_atomic() failed, ret=%d\n",
 			   ret);
 		return -1;
 	}

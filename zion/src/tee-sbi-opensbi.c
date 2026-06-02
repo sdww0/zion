@@ -5,6 +5,10 @@
  *
  * SBI ecall handler for the Zion TEE extension (SBI_EXT_EXPERIMENTAL_zion).
  * Dispatches enclave management calls from enclave VS-mode.
+ *
+ * Convention: SM error codes (100000+) are returned via retval (a0).
+ * out->value (a1) carries the result (enclave ID, etc.).
+ * Functions that do tee_mret never return (RUN/RESUME/STOP/EXIT).
  */
 
 #include <sbi/sbi_ecall.h>
@@ -14,6 +18,7 @@
 #include <sbi/sbi_console.h>
 #include "sm-sbi.h"
 #include "sm_call.h"
+#include "sm_err.h"
 #include "tee.h"
 
 static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
@@ -53,18 +58,18 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 		break;
 	case SBI_SM_STOP_ENCLAVE:
 		retval = sbi_sm_stop_enclave(regs, regs->a0);
-		out->value = retval;
+		__builtin_unreachable();
 		break;
 	case SBI_SM_EXIT_ENCLAVE:
 		retval = sbi_sm_exit_enclave(regs, regs->a0);
-		out->value = retval;   /* host reads enclave return value from a1 */
-		retval = 0;            /* tell OpenSBI this ecall succeeded */
+		__builtin_unreachable();
 		break;
 	case SBI_SM_CALL_PLUGIN:
 		retval = sbi_sm_call_plugin(regs->a0, regs->a1, regs->a2, regs->a3);
 		break;
-		retval = -1;
-		sbi_printf("[SM] sbi_ecall_tee_handler(): unknown funcid %lu\n",
+	default:
+		retval = SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR;
+		tee_log("[SM] sbi_ecall_tee_handler(): unknown funcid %lu\n",
 			   funcid);
 		break;
 	}
@@ -75,5 +80,5 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 struct sbi_ecall_extension ecall_zion_tee = {
 	.extid_start = SBI_EXT_EXPERIMENTAL_zion,
 	.extid_end   = SBI_EXT_EXPERIMENTAL_zion,
-	.handle	     = sbi_ecall_tee_handler,
+	.handle	 = sbi_ecall_tee_handler,
 };
