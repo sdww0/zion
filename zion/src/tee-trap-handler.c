@@ -22,6 +22,14 @@
 
 #define CVM_SHARED_MEM_FAULT_ADDR_BASE 0x4000000000ULL
 
+/* Enclave path debug logging — comment out to silence */
+#define ENCLAVE_LOG
+#ifdef ENCLAVE_LOG
+#define encl_printf(...) sbi_printf(__VA_ARGS__)
+#else
+#define encl_printf(...) do {} while (0)
+#endif
+
 static void sbi_trap_error(const char *msg, int rc, ulong mcause, ulong mtval,
 			   ulong mtval2, ulong mtinst,
 			   struct sbi_trap_regs *regs)
@@ -256,7 +264,7 @@ static int handle_guest_page_fault(struct sbi_trap_regs *regs,
 	}
 
 	zion_printf(
-		"[SBI] cvm_trap_handler: guest page fault, fault_addr=0x%lx, mcause=0x%lx\n",
+		"[SBI] guest-pf: addr=0x%lx mcause=0x%lx\n",
 		fault_addr, mcause);
 
 	struct cvm_mem_info *cvm_mem_info = &cvms[rtid].mem_info;
@@ -300,8 +308,8 @@ static int handle_guest_page_fault(struct sbi_trap_regs *regs,
 	fill_mmio_exit_reg(exit_mmio_reg, exit_cause, insn, insn_len);
 
 	zion_printf(
-		"[SBI] cvm_trap_handler: guest page fault, exit_cause=%d, insn=0x%lx, insn_len=%lu, rs2_offset=%u, rd_offset=%u\n",
-		exit_cause, insn, insn_len, exit_mmio_reg->rs2_offset,
+		"[SBI] guest-pf: exit=%d insn=0x%lx rs2=%u rd=%u\n",
+		exit_cause, insn, exit_mmio_reg->rs2_offset,
 		exit_mmio_reg->rd_offset);
 
 	deliver_trap_to_ree(regs->mepc, mcause, trap);
@@ -352,7 +360,7 @@ struct sbi_trap_context *cvm_trap_handler(struct sbi_trap_context *tcntx)
 	if (!(regs->mstatus & MSTATUS_MPV)) {
 		/* Previous privilege level is not in virtualization mode. */
 		sbi_printf(
-			"[SM] !!!ERROR!!! in cvm_trap_handler!!! mepc=%lx, mcause=%lx, mstatus=%lx\n",
+			"[SM] !!!ERROR!!! cvm_trap: mepc=%lx mcause=%lx mstatus=%lx\n",
 			regs->mepc, mcause, regs->mstatus);
 		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
 			       trap->tinst, regs);
@@ -433,8 +441,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 	ulong mcause		    = tcntx->trap.cause;
 	ulong interrupt_mask	    = 1UL << (__riscv_xlen - 1);
 
-	sbi_printf("[SM] enclave_trap_handler: mcause=0x%lx mepc=0x%lx mstatus=0x%lx\n",
-		   mcause, regs->mepc, regs->mstatus);
+	/* encl_printf("  trap: cause=0x%lx mepc=0x%lx\n", mcause, regs->mepc); */
 
 	/* Update trap context pointer */
 	tcntx->prev_context = sbi_trap_get_context(scratch);
@@ -453,23 +460,20 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 
 		switch (interrupt_cause) {
 		case IRQ_M_TIMER:
-			sbi_printf("[SM] IRQ_M_TIMER in enclave, stopping eid=%d\n", eid);
-			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
-			sbi_printf("[SM] IRQ_M_TIMER: stop done, rc=%d mepc=0x%lx\n", rc, regs->mepc);
-			/* Return SBI_ERR_SM_ENCLAVE_INTERRUPTED to kernel.
-			 * Do NOT call deliver_trap_to_ree — M-mode cause (7) is
-			 * wrong for S-mode scause, and the M-timer has been consumed.
-			 * Kernel checks ret.error and handles timer itself. */
+			/* M-timer during enclave: stop and return to host.
+			 * This is the standard Keystone preemption mechanism. */
+			stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->mepc += 4;
 			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
 			regs->a1 = 0;
-			regs->mepc += 4;
-			sbi_printf("[SM] IRQ_M_TIMER: a0=0x%lx mepc=0x%lx\n", regs->a0, regs->mepc);
+			rc = 0;
 			goto trap_done;
 		case IRQ_S_TIMER:
-			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->mepc += 4;
 			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
 			regs->a1 = 0;
-			regs->mepc += 4;
+			rc = 0;
 			goto trap_done;
 		case IRQ_M_SOFT:
 			sbi_ipi_process();
@@ -477,10 +481,11 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			goto trap_done;
 		case IRQ_S_SOFT:
 		case IRQ_S_EXT:
-			rc = stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
+			regs->mepc += 4;
 			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
 			regs->a1 = 0;
-			regs->mepc += 4;
+			rc = 0;
 			goto trap_done;
 		default:
 			msg = "unhandled enclave interrupt";
@@ -489,21 +494,77 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		}
 	}
 
-	/* Exception handling -- require valid virtual-mode context */
+	/* Exception handling.
+	 *
+	 * When exceptions are delegated via medeleg to S-mode (HS-mode)
+	 * and then via hedeleg to VS-mode, the hardware does NOT set
+	 * mstatus.MPV — it sets sstatus.SPV instead.  So we cannot
+	 * rely on MPV to determine whether this exception came from
+	 * the enclave.  Trust the caller_rtid/hart context instead.
+	 *
+	/* Log a warning if MPV is unexpectedly clear, but continue. */
 	if (!(regs->mstatus & MSTATUS_MPV)) {
-		sbi_printf(
-			"[SM] !!!ERROR!!! in enclave_trap_handler!!! mepc=%lx, mcause=%lx, mstatus=%lx\n",
-			regs->mepc, mcause, regs->mstatus);
-		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
-			       trap->tinst, regs);
-		sbi_hart_hang();
+		encl_printf("[SM] encl_trap: MPV=0, mepc=0x%lx mcause=0x%lx "
+			    "mstatus=0x%lx (delegated exception)\n",
+			    regs->mepc, mcause, regs->mstatus);
 	}
 
 	switch (mcause) {
 	case CAUSE_ILLEGAL_INSTRUCTION:
-		rc  = sbi_illegal_insn_handler(tcntx);
-		msg = "illegal instruction handler failed";
+	{
+		encl_printf("\n");
+		encl_printf("[SM] ┌─────────────────────────────────────────┐\n");
+		encl_printf("[SM] │  !! ILLEGAL INSTRUCTION — HANGING !!    │\n");
+		encl_printf("[SM] ├─────────────────────────────────────────┤\n");
+		encl_printf("[SM] │   mepc    = 0x%lx  mstatus = 0x%lx\n",
+			    regs->mepc, regs->mstatus);
+		encl_printf("[SM] │   mtval   = 0x%lx\n", csr_read(CSR_MTVAL));
+
+		/* ---- G-stage page table walk diagnostic ---- */
+		uintptr_t gpa = regs->mepc;
+		uintptr_t hgatp_val = csr_read(CSR_HGATP);
+		uintptr_t root_pt_pa = (hgatp_val & 0xFFFFFFFFFFFULL) << 12;
+		encl_printf("[SM] │   hgatp   = 0x%lx  root_pt=0x%lx\n",
+			    hgatp_val, root_pt_pa);
+
+		/* Walk G-stage page table (Sv48x4, 4 levels, 9-bit index) */
+		pte_t *pt = (pte_t *)root_pt_pa;
+		for (int lvl = 3; lvl >= 0; lvl--) {
+			uint64_t idx = (gpa >> (12 + lvl * 9)) & 0x1FF;
+			pte_t pte = pt[idx];
+			encl_printf("[SM] │   level[%d] idx=%lu pte=0x%lx",
+				    lvl, (unsigned long)idx, (unsigned long)pte);
+			if (!(pte & PTE_V)) {
+				encl_printf(" INVALID\n");
+				break;
+			}
+			uintptr_t next_pa = ((pte >> 10) << 12);
+			if (lvl == 1 || lvl == 0) {
+				/* Leaf PTE */
+				uintptr_t hpa = next_pa + (gpa & ((1UL << (12 + lvl * 9)) - 1));
+				encl_printf(" → HPA=0x%lx\n", hpa);
+				/* Dump first 32 bytes of the HPA */
+				uint32_t *code = (uint32_t *)hpa;
+				encl_printf("[SM] │   [0x%lx] = %08x %08x %08x %08x\n",
+					    hpa, code[0], code[1], code[2], code[3]);
+				encl_printf("[SM] │   [0x%lx] = %08x %08x %08x %08x\n",
+					    hpa + 16, code[4], code[5], code[6], code[7]);
+				break;
+			}
+			encl_printf(" → next=0x%lx\n", next_pa);
+			pt = (pte_t *)next_pa;
+		}
+
+		encl_printf("[SM] │   a0=0x%lx  a1=0x%lx  sp=0x%lx  ra=0x%lx\n",
+			    regs->a0, regs->a1, regs->sp, regs->ra);
+		encl_printf("[SM] │   hgatp   = 0x%lx  hstatus = 0x%lx\n",
+			    csr_read(CSR_HGATP), csr_read(CSR_HSTATUS));
+		encl_printf("[SM] │   vsatp   = 0x%lx  vstvec  = 0x%lx\n",
+			    csr_read(CSR_VSATP), csr_read(CSR_VSTVEC));
+		encl_printf("[SM] └─────────────────────────────────────────┘\n");
+		while (1) { __asm__ volatile("wfi"); }
 		break;
+	}
 	case CAUSE_MISALIGNED_LOAD:
 		rc  = sbi_misaligned_load_handler(tcntx);
 		msg = "misaligned load handler failed";
@@ -520,22 +581,39 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		/* Fall through to VS-mode ecall handling */
 		/* fallthrough */
 	case CAUSE_VIRTUAL_SUPERVISOR_ECALL:
-		sbi_printf("[SM] enclave VS-ecall: a7=0x%lx a6=0x%lx a0=0x%lx\n",
-			   regs->a7, regs->a6, regs->a0);
+		/* encl_printf("  → VS-ecall: a7=0x%lx a6=0x%lx\n",
+			   regs->a7, regs->a6); */
 		if (is_zion_sbi(regs->a7)) {
+			/* sbi_ecall_handler advances mepc internally */
 			rc = sbi_ecall_handler(tcntx);
 		} else if (regs->a7 == SBI_EXT_0_1_CONSOLE_PUTCHAR) {
 			/* Eyrie legacy putchar: a0 = character */
 			sbi_printf("%c", (char)regs->a0);
+			regs->mepc += 4;
 			rc = 0;
 		} else if (regs->a7 == SBI_EXT_DBCN &&
 			   regs->a6 == SBI_EXT_DBCN_CONSOLE_WRITE_BYTE) {
 			sbi_printf("%c", (char)regs->a0);
+			regs->mepc += 4;
 			rc = 0;
 		} else {
-			/* Unknown ecall: exit enclave to host */
-			deliver_trap_to_ree(regs->mepc, mcause, trap);
-			rc = exit_enclave(regs, eid);
+			/* Forward standard SBI ecalls to OpenSBI handler.
+			 * sbi_ecall_handler handles mepc internally. */
+			sbi_printf("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx to OpenSBI\n",
+				   regs->a7, regs->a6);
+			rc = sbi_ecall_handler(tcntx);
+			if (rc) {
+				sbi_printf("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",
+					   regs->a7, rc);
+				/* Unknown/failed ecall: exit enclave to host */
+				regs->mepc += 4;
+				deliver_trap_to_ree(regs->mepc - 4, mcause, trap);
+				rc = exit_enclave(regs, eid);
+				/* After exit_enclave, regs has host context.
+				 * host mepc = ecall PC (from run_enclave/resume_enclave).
+				 * Must +4 to skip the host's ecall instruction. */
+				regs->mepc += 4;
+			}
 		}
 		break;
 	case CAUSE_FETCH_GUEST_PAGE_FAULT:
@@ -547,29 +625,21 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		 * paging). Otherwise, exit to host.
 		 */
 		{
-			unsigned long fault_addr =
-				(trap->tval2 << 2) | (trap->tval & 0x3);
-			struct enclave *enc = &enclaves[eid];
+	unsigned long fault_addr = (trap->tval2 << 2) | (trap->tval & 0x3);
+		struct enclave *enc = &enclaves[eid];
 
-			sbi_printf("[SM] page fault: addr=0x%lx mepc=0x%lx "
-				   "epm=[0x%lx, 0x%lx) utm=[0x%lx, 0x%lx)\n",
-				   fault_addr, regs->mepc,
-				   enc->mem_info.epm_base,
-				   enc->mem_info.epm_base + enc->mem_info.epm_size,
-				   enc->mem_info.utm_base,
-				   enc->mem_info.utm_base + enc->mem_info.utm_size);
+		encl_printf("  → page fault: addr=0x%lx mepc=0x%lx\n",
+			   fault_addr, regs->mepc);
 
-			if (enc->mem_info.epm_base &&
-			    fault_addr >= enc->mem_info.epm_base &&
-			    fault_addr < enc->mem_info.epm_base +
-					 enc->mem_info.epm_size) {
+		if (enc->mem_info.epm_base &&
+		    fault_addr >= enc->mem_info.epm_base &&
+		    fault_addr < enc->mem_info.epm_base +
+				 enc->mem_info.epm_size) {
 				/* Demand-page: allocate 2MB block */
 				uint64_t block = alloc_data_block(
 					&g_mem_pool.data_pool, eid);
 				if (block == (uint64_t)-1) {
-					sbi_printf("[SM] enclave page fault: "
-						   "out of data blocks, eid=%u\n",
-						   eid);
+					encl_printf("  → page fault: OOM\n");
 					rc = -1;
 					goto trap_done;
 				}
@@ -577,10 +647,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 						   fault_addr, block,
 						   BLOCK_SIZE, IS_HUGE_PAGE,
 						   false)) {
-					sbi_printf("[SM] enclave page fault: "
-						   "map failed, eid=%u, "
-						   "addr=0x%lx\n",
-						   eid, fault_addr);
+					encl_printf("  → page fault: map failed\n");
 					rc = -1;
 					goto trap_done;
 				}
@@ -593,13 +660,35 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 				/* UTM fault: exit to host for setup */
 				deliver_trap_to_ree(regs->mepc, mcause, trap);
 				rc = exit_enclave(regs, eid);
-			} else {
-				sbi_printf("[SM] enclave page fault: "
-					   "unmapped region, eid=%u, "
-					   "addr=0x%lx\n",
-					   eid, fault_addr);
+				/* Skip host's ecall instruction */
+				regs->mepc += 4;
+		} else {
+			/*
+			 * Unmapped guest page fault — redirect to VS-mode
+			 * so Eyrie's stvec handler can process it (demand-
+			 * paging, COW, or clean exit via sbi_stop_enclave).
+			 *
+			 * Guest page faults (cause 20/21/23) are NOT in
+			 * medeleg, so they always reach M-mode.  We inject
+			 * them into VS-mode by writing the virtual exception
+			 * CSRs and jumping to vstvec.
+			 */
+			uintptr_t vstvec = csr_read(CSR_VSTVEC);
+			encl_printf("  → page fault: unmapped 0x%lx, "
+				   "redirect to VS-mode (vstvec=0x%lx)\n",
+				   fault_addr, vstvec);
+			if (vstvec == 0) {
+				encl_printf("  → page fault: no vstvec, "
+					   "fatal\n");
 				rc = -1;
+				goto trap_done;
 			}
+			csr_write(CSR_VSEPC, regs->mepc);
+			csr_write(CSR_VSCAUSE, mcause);
+			csr_write(CSR_VSTVAL, fault_addr);
+			regs->mepc = vstvec;
+			rc = 0;
+		}
 		}
 		break;
 	default:
@@ -609,44 +698,14 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 	}
 
 trap_done:
-	sbi_printf("[SM] encl_trap_done: rc=%d mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu\n",
-		   rc, regs->mepc, regs->mstatus,
-		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
-		   (regs->mstatus & MSTATUS_MPV) >> 39);
-
-	sbi_printf("[SM] ===== ENCLAVE->REE REG DUMP =====\n");
-	sbi_printf("[SM]   mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu sie=%lu\n",
-		   regs->mepc, regs->mstatus,
-		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
-		   (regs->mstatus & MSTATUS_MPV) >> 39,
-		   (regs->mstatus & MSTATUS_SIE) >> 1);
-	sbi_printf("[SM]   hgatp=0x%lx hstatus=0x%lx mtvec=0x%lx\n",
-		   csr_read(CSR_HGATP), csr_read(CSR_HSTATUS),
-		   csr_read(CSR_MTVEC));
-	sbi_printf("[SM]   medeleg=0x%lx mideleg=0x%lx mie=0x%lx\n",
-		   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG),
-		   csr_read(CSR_MIE));
-	sbi_printf("[SM]   hideleg=0x%lx hedeleg=0x%lx\n",
-		   csr_read(CSR_HIDELEG), csr_read(CSR_HEDELEG));
-	sbi_printf("[SM]   satp=0x%lx sscratch=0x%lx stvec=0x%lx\n",
-		   csr_read(CSR_SATP), csr_read(CSR_SSCRATCH),
-		   csr_read(CSR_STVEC));
-	sbi_printf("[SM]   vsstatus=0x%lx vsatp=0x%lx vstvec=0x%lx\n",
-		   csr_read(CSR_VSSTATUS), csr_read(CSR_VSATP),
-		   csr_read(CSR_VSTVEC));
-	sbi_printf("[SM]   GPRs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-		   regs->a0, regs->a1, regs->a2, regs->a3);
-	sbi_printf("[SM]   GPRs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-		   regs->a4, regs->a5, regs->a6, regs->a7);
-	sbi_printf("[SM]   GPRs: sp=0x%lx ra=0x%lx gp=0x%lx tp=0x%lx\n",
-		   regs->sp, regs->ra, regs->gp, regs->tp);
-	sbi_printf("[SM]   GPRs: t0=0x%lx t1=0x%lx t2=0x%lx s0=0x%lx\n",
-		   regs->t0, regs->t1, regs->t2, regs->s0);
-	sbi_printf("[SM] ===== ENCLAVE->REE DUMP END =====\n");
-
-	if (rc)
+	if (rc) {
+		encl_printf("[SM] ENCLAVE TRAP ERROR: rc=%d mepc=0x%lx mcause=0x%lx mstatus=0x%lx\n",
+			   rc, regs->mepc, mcause, regs->mstatus);
+		encl_printf("[SM]   tval=0x%lx tval2=0x%lx tinst=0x%lx\n",
+			   trap->tval, trap->tval2, trap->tinst);
 		sbi_trap_error(msg, rc, mcause, trap->tval, trap->tval2,
 			       trap->tinst, regs);
+	}
 
 	/* Do NOT call sbi_sse_process_pending_events(regs) here.
 	 * After context_switch_from() (via stop_enclave), regs contains
@@ -669,8 +728,6 @@ trap_done:
 struct sbi_trap_context *tee_dispatch_trap(struct sbi_trap_context *tcntx)
 {
 	zion_mode mode = hart_get_mode();
-	sbi_printf("[SM] tee_dispatch_trap: mode=%d mcause=0x%lx mepc=0x%lx mstatus=0x%lx\n",
-		   mode, tcntx->trap.cause, tcntx->regs.mepc, tcntx->regs.mstatus);
 
 	if (mode == ENCLAVE)
 		return enclave_trap_handler(tcntx);
