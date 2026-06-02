@@ -91,6 +91,114 @@ static inline bool is_zion_sbi(unsigned long extid)
 	return false;
 }
 
+/*
+ * dump_translation - Walk VS-stage + G-stage page tables for a VA.
+ *
+ * Given a VS-mode virtual address, walks the VS-stage page table
+ * (VSATP) to find the GPA, then walks the G-stage page table (HGATP)
+ * to find the HPA. Prints the full translation chain for debugging.
+ *
+ * Also dumps the VS-stage PTE at each level so we can see exactly
+ * where the translation breaks.
+ */
+static void dump_translation(uintptr_t va)
+{
+	uintptr_t vsatp = csr_read(CSR_VSATP);
+	uintptr_t hgatp = csr_read(CSR_HGATP);
+
+	sbi_printf("[SM] === Translation dump for VA 0x%lx ===\n", va);
+	sbi_printf("[SM]   VSATP=0x%lx HGATP=0x%lx\n", vsatp, hgatp);
+
+	/* ---- Walk VS-stage (Sv39) ---- */
+	uintptr_t vs_mode = (vsatp >> 60) & 0xf;
+	uintptr_t vs_root_ppn = vsatp & 0xFFFFFFFFFFFUL;
+	uintptr_t vs_root_pa = vs_root_ppn << 12;
+
+	if (vs_mode == 0) {
+		sbi_printf("[SM]   VSATP mode=BARE (no VS-stage translation)\n");
+		sbi_printf("[SM]   VA==GPA: 0x%lx\n", va);
+	} else {
+		sbi_printf("[SM]   VSATP mode=Sv%lu root=0x%lx\n",
+			   (vs_mode == 8) ? 39UL : (vs_mode == 9) ? 48UL : 0UL,
+			   vs_root_pa);
+
+		/* Sv39: 3 levels (2,1,0), 9-bit index each */
+		pte_t *pt = (pte_t *)vs_root_pa;
+		uintptr_t gpa = 0;
+		int ok = 0;
+		for (int lvl = 2; lvl >= 0; lvl--) {
+			uint64_t idx = (va >> (12 + lvl * 9)) & 0x1FF;
+			pte_t pte = pt[idx];
+			sbi_printf("[SM]   VS L%d[%lu] @ 0x%lx = 0x%lx",
+				   lvl, idx, (uintptr_t)&pt[idx], (unsigned long)pte);
+			if (!(pte & PTE_V)) {
+				sbi_printf(" INVALID\n");
+				break;
+			}
+			uintptr_t ppn = (pte >> 10) & 0xFFFFFFFFFFFUL;
+			uintptr_t pa  = ppn << 12;
+			if (pte & (PTE_R | PTE_W | PTE_X)) {
+				/* Leaf */
+				uintptr_t page_size = 1UL << (12 + lvl * 9);
+				uintptr_t mask = page_size - 1;
+				gpa = (pa & ~mask) | (va & mask);
+				sbi_printf(" LEAF → GPA=0x%lx\n", gpa);
+				ok = 1;
+				break;
+			}
+			sbi_printf(" → next=0x%lx\n", pa);
+			pt = (pte_t *)pa;
+		}
+		if (!ok) {
+			sbi_printf("[SM]   VS-stage: no valid translation for VA 0x%lx\n", va);
+			sbi_printf("[SM] === End translation dump ===\n");
+			return;
+		}
+
+		/* ---- Walk G-stage (Sv48x4) ---- */
+		uintptr_t g_root_ppn = hgatp & 0xFFFFFFFFFFFUL;
+		uintptr_t g_root_pa  = g_root_ppn << 12;
+		/* Sv48x4: 4 levels (3,2,1,0), level-3 index is 2 extra bits (bits 47:39 → 11 bits) */
+		pt = (pte_t *)g_root_pa;
+		uintptr_t hpa = 0;
+		ok = 0;
+		for (int lvl = 3; lvl >= 0; lvl--) {
+			uint64_t idx;
+			if (lvl == 3)
+				idx = (gpa >> 39) & 0x7FF; /* 11 bits for level 3 */
+			else
+				idx = (gpa >> (12 + lvl * 9)) & 0x1FF;
+			pte_t pte = pt[idx];
+			sbi_printf("[SM]   G  L%d[%lu] @ 0x%lx = 0x%lx",
+				   lvl, idx, (uintptr_t)&pt[idx], (unsigned long)pte);
+			if (!(pte & PTE_V)) {
+				sbi_printf(" INVALID\n");
+				break;
+			}
+			uintptr_t ppn = (pte >> 10) & 0xFFFFFFFFFFFUL;
+			uintptr_t pa  = ppn << 12;
+			if (pte & (PTE_R | PTE_W | PTE_X)) {
+				uintptr_t page_size = (lvl == 1) ? (1UL << 21) :
+						      (lvl == 2) ? (1UL << 30) :
+						      (1UL << 12);
+				uintptr_t mask = page_size - 1;
+				hpa = (pa & ~mask) | (gpa & mask);
+				sbi_printf(" LEAF → HPA=0x%lx\n", hpa);
+				ok = 1;
+				break;
+			}
+			sbi_printf(" → next=0x%lx\n", pa);
+			pt = (pte_t *)pa;
+		}
+		if (!ok)
+			sbi_printf("[SM]   G-stage: no valid translation for GPA 0x%lx\n", gpa);
+		else
+			sbi_printf("[SM]   VA 0x%lx → GPA 0x%lx → HPA 0x%lx\n",
+				   va, gpa, hpa);
+	}
+	sbi_printf("[SM] === End translation dump ===\n");
+}
+
 static inline void deliver_trap_to_ree(ulong mepc, ulong mcause,
 				       struct sbi_trap_info *trap)
 {
@@ -596,11 +704,26 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			sbi_printf("%c", (char)regs->a0);
 			regs->mepc += 4;
 			rc = 0;
+		} else if (regs->a7 == 1111) {
+			/* Runtime not_implemented_fatal: a0 = scause of original fault.
+			 * Dump translation for the faulting addresses. */
+			sbi_printf("[SM] === Runtime FATAL: a7=1111 a0(scause)=0x%lx sepc=0x%lx ===\n",
+				   regs->a0, regs->mepc);
+			sbi_printf("[SM] Dumping translations for key addresses:\n");
+			dump_translation(0x1000);   /* eapp's first page (fault addr) */
+			dump_translation(0x100c);   /* actual fault address from log */
+			dump_translation(0x100e8);  /* eapp entry point */
+			dump_translation(0x10000);  /* eapp .text base (from ELF) */
+			sbi_printf("[SM] === End FATAL dump, exiting enclave ===\n");
+			regs->mepc += 4;
+			deliver_trap_to_ree(regs->mepc - 4, mcause, trap);
+			rc = exit_enclave(regs, eid);
+			regs->mepc += 4;
 		} else {
 			/* Forward standard SBI ecalls to OpenSBI handler.
 			 * sbi_ecall_handler handles mepc internally. */
-			sbi_printf("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx to OpenSBI\n",
-				   regs->a7, regs->a6);
+			sbi_printf("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx sepc=0x%lx a0=0x%lx\n",
+				   regs->a7, regs->a6, regs->mepc, regs->a0);
 			rc = sbi_ecall_handler(tcntx);
 			if (rc) {
 				sbi_printf("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",

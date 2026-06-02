@@ -11,8 +11,8 @@
 
 static int zion_init_done = 0;
 
-/* Defined in sm-sbi-opensbi.c */
-extern struct sbi_ecall_extension ecall_keystone_enclave;
+/* Defined in tee-sbi-opensbi.c — unified CVM + Enclave handler */
+extern struct sbi_ecall_extension ecall_zion_tee;
 
 void zion_init(bool cold_boot)
 {
@@ -20,8 +20,8 @@ void zion_init(bool cold_boot)
 		sbi_printf("[SBI] Zion TEE initializing ... hart [%lx]\n",
 			   csr_read(mhartid));
 
-		/* Register enclave SBI extension */
-		sbi_ecall_register_extension(&ecall_keystone_enclave);
+		/* Register unified TEE SBI extension (CVM + Enclave) */
+		sbi_ecall_register_extension(&ecall_zion_tee);
 
 		/* Load attestation keys (platform-specific) */
 		sm_copy_key();

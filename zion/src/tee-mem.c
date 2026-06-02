@@ -30,8 +30,10 @@ static inline void tee_mem_status(data_pool_t *dp)
 	int free_blocks		= get_free_data_block_count(dp);
 	int allocated_blocks	= get_allocated_data_block_count(dp);
 
-	zion_printf("[SM] Data Pool -- Free blocks: %d, Allocated blocks: %d\n",
-		    free_blocks, allocated_blocks);
+	// zion_printf("[SM] Data Pool -- Free blocks: %d, Allocated blocks: %d\n",
+	// 	    free_blocks, allocated_blocks);
+	(void)free_blocks;
+	(void)allocated_blocks;
 #else
 	(void)dp;
 #endif

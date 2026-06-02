@@ -64,8 +64,10 @@ static inline void context_switch_to_enclave(struct sbi_trap_regs* regs,
              enclaves[eid].threads[0].prev_csrs.hcounteren | 0x7,
              csr_read(CSR_HCOUNTEREN));
 
-  sm_debug("[SM] context_switch_to_enclave: eid=%d, hstatus=%lx, mstatus=%lx, mepc=%lx\n",
-             eid, enclaves[eid].threads[0].prev_csrs.hstatus, regs->mstatus, regs->mepc);
+  sm_debug("\n[SM] ===== ENCLAVE ENTER eid=%d =====\n", eid);
+  sm_debug("[SM]   mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
+             regs->mepc, regs->mstatus,
+             enclaves[eid].threads[0].prev_csrs.hstatus);
 
   /* On first run (load_parameters=1), MPP is set to S-mode inside the block below.
    * On resume, swap_prev_mstatus already restores the enclave's saved mstatus
@@ -112,8 +114,10 @@ static inline void context_switch_to_enclave(struct sbi_trap_regs* regs,
     csr_write(CSR_VSTVAL, 0);
     csr_write(CSR_VSATP, 0);
 
-    sm_debug("[SM] run_enclave: first run, mepc=%lx, mstatus=%lx (MPP=S, MPV=1)\n",
+    sm_debug("[SM]   first run: mepc=0x%lx mstatus=0x%lx (MPP=S MPV=1)\n",
                regs->mepc, regs->mstatus);
+    sm_debug("[SM]   hedeleg=0x%lx hgatp=0x%lx satp=0 (bare)\n",
+               enclave_hedeleg_local, csr_read(CSR_HGATP));
     // $a1: (PA) DRAM base,
     regs->a1 = (uintptr_t) enclaves[eid].params.dram_base;
     // $a2: DRAM size,
@@ -180,8 +184,7 @@ static inline void context_switch_to_host(struct sbi_trap_regs *regs,
   csr_write(CSR_MENVCFG, enclaves[eid].threads[0].prev_csrs.menvcfg);
   csr_write(CSR_HCOUNTEREN, enclaves[eid].threads[0].prev_csrs.hcounteren);
 
-  sm_debug("[SM] context_switch_to_host: eid=%d, hstatus=%lx\n",
-             eid, enclaves[eid].threads[0].prev_csrs.hstatus);
+  sm_debug("[SM] ===== ENCLAVE EXIT eid=%d =====\n\n", eid);
 
   switch_vector_host();
 

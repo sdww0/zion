@@ -26,7 +26,6 @@ zion-objs-y += src/platform/zion/platform.o
 
 # OpenSBI integration (Zion glue layer)
 zion-objs-y += src/zion.o
-zion-objs-y += src/sm-sbi-opensbi.o
 zion-objs-y += src/tee-sbi-opensbi.o
 zion-objs-y += src/plugins/plugins.o
 zion-objs-y += src/plugins/multimem.o

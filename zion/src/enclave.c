@@ -404,6 +404,38 @@ unsigned long create_enclave(unsigned long *eidptr,
 	uint64_t hgatp = ((unsigned long)root_pt >> PAGE_SHIFT) |
 		 (HGATP_MODE_SV48X4 << HGATP_MODE_SHIFT);
 
+	/* ---- Verify G-stage mapping ---- */
+	sbi_printf("[SM] create_enclave: G-stage verification (root_pt=0x%lx):\n",
+		   (unsigned long)root_pt);
+	for (int i = 0; i < n_blocks; i++) {
+		uint64_t gpa = epm_pa + (uint64_t)i * BLOCK_SIZE;
+		/* Walk G-stage: level 3 (11-bit index) → level 0 */
+		pte_t *pt = (pte_t *)root_pt;
+		pte_t pte = 0;
+		for (int lvl = 3; lvl >= 1; lvl--) {
+			uint64_t idx;
+			if (lvl == 3)
+				idx = (gpa >> 39) & 0x7FF;
+			else
+				idx = (gpa >> (12 + lvl * 9)) & 0x1FF;
+			pte = pt[idx];
+			if (!(pte & PTE_V)) {
+				sbi_printf("[SM]   G L%d[%lu] INVALID\n", lvl, idx);
+				break;
+			}
+			pt = (pte_t *)(((pte >> 10) & 0xFFFFFFFFFFFULL) << 12);
+		}
+		if (pte & PTE_V) {
+			uint64_t idx = (gpa >> 12) & 0x1FF;
+			pte = pt[idx];
+			uint64_t hpa = ((pte >> 10) & 0xFFFFFFFFFFFULL) << 12;
+			sbi_printf("[SM]   GPA 0x%lx → HPA 0x%lx (pte=0x%lx)\n",
+				   gpa, hpa, (unsigned long)pte);
+		}
+	}
+	sbi_printf("[SM] create_enclave: dram_base=0x%lx user_paddr=0x%lx runtime_paddr=0x%lx\n",
+		   epm_pa, create_args.user_paddr, create_args.runtime_paddr);
+
 	/* ---- Fill enclave metadata ---- */
 	enclaves[eid].eid = eid;
 	enclaves[eid].n_thread = 0;

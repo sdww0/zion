@@ -89,18 +89,47 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 	ulong mtval = csr_read(CSR_MTVAL), mtval2 = 0, mtinst = 0;
 	struct sbi_trap_info trap;
 
-	sm_debug("[SM] trap_handler_enclave: mcause=%lx, mtval=%lx, mepc=%lx\n",
-		   mcause, mtval, regs->mepc);
+	/* Concise trap line — one per trap */
+	const char *cause_str = "unknown";
+	if (mcause & (1UL << (__riscv_xlen - 1))) {
+		ulong irq = mcause & ~(1UL << (__riscv_xlen - 1));
+		switch (irq) {
+		case IRQ_M_TIMER: cause_str = "M-timer"; break;
+		case IRQ_M_SOFT:  cause_str = "M-soft"; break;
+		case IRQ_S_TIMER: cause_str = "S-timer"; break;
+		case IRQ_S_EXT:   cause_str = "S-ext"; break;
+		default: break;
+		}
+	} else {
+		switch (mcause) {
+		case 0:  cause_str = "insn-fetch"; break;
+		case 1:  cause_str = "load-access"; break;
+		case 2:  cause_str = "illegal-insn"; break;
+		case 3:  cause_str = "breakpoint"; break;
+		case 4:  cause_str = "load-align"; break;
+		case 5:  cause_str = "store-access"; break;
+		case 6:  cause_str = "store-align"; break;
+		case 7:  cause_str = "ecall-U"; break;
+		case 8:  cause_str = "ecall-S"; break;
+		case 9:  cause_str = "ecall-VS"; break;
+		case 11: cause_str = "ecall-M"; break;
+		case 12: cause_str = "fetch-pf"; break;
+		case 13: cause_str = "load-pf"; break;
+		case 15: cause_str = "store-pf"; break;
+		case 16: cause_str = "virt-insn"; break;
+		case 20: cause_str = "inst-pf"; break;
+		case 22: cause_str = "guest-pf"; break;
+		case 23: cause_str = "store-guest-pf"; break;
+		default: break;
+		}
+	}
+	sbi_printf("[SM] trap: cause=%lu (%s) mepc=0x%lx tval=0x%lx\n",
+		   mcause, cause_str, regs->mepc, mtval);
 
 	if (regs->mepc == 0) {
 		sbi_printf("[SM] FATAL: mepc=0, hanging. mcause=%lx mtval=%lx henvcfg=%lx hedeleg=%lx\n",
 			   mcause, mtval, csr_read(CSR_HENVCFG), csr_read(CSR_HEDELEG));
 		while(1) { asm volatile("wfi"); }
-	}
-
-	if (mcause == 16) {
-		sm_debug("[SM] virtual instruction fault: henvcfg=%lx, mtinst=%lx\n",
-			   csr_read(CSR_HENVCFG), csr_read(CSR_MTINST));
 	}
 
 	if (misa_extension('H')) {
@@ -112,7 +141,7 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 		mcause &= ~(1UL << (__riscv_xlen - 1));
 		switch (mcause) {
 		case IRQ_M_TIMER: {
-      sm_debug("[SM] timer interrupt in enclave\n");
+      sm_debug("[SM]   → stop enclave (timer)\n");
       regs->mepc -= 4;
       sbi_sm_stop_enclave(regs, STOP_TIMER_INTERRUPT);
       regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
@@ -149,7 +178,7 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 	case CAUSE_SUPERVISOR_ECALL:
 	case CAUSE_VIRTUAL_SUPERVISOR_ECALL:
 	case CAUSE_MACHINE_ECALL:
-		sm_debug("[SM] ecall from enclave: cause=%lx, mepc=%lx\n", mcause, regs->mepc);
+		sm_debug("[SM]   → ecall: a7=0x%lx a6=0x%lx\n", regs->a7, regs->a6);
 		{ struct sbi_trap_context _tc = { .regs = *regs, .trap = {CAUSE_MACHINE_ECALL, 0} }; rc = sbi_ecall_handler(&_tc); *regs = _tc.regs; }
 		msg = "ecall handler failed";
 		break;
@@ -175,8 +204,8 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 					sm_debug("[SM] unhandled VIF: csr=%lx insn=%lx\n", csr, insn);
 					goto trap_error;
 				}
-				sm_debug("[SM] emulate csrr rd=x%ld csr=%lx val=%lx mepc=%lx\n",
-					   rd, csr, val, regs->mepc);
+				sm_debug("[SM]   → emulate csrr rd=x%ld csr=0x%lx val=0x%lx\n",
+					   rd, csr, val);
 				if (rd > 0)
 					((uintptr_t*)regs)[rd] = val;
 				regs->mepc += ((insn & 0x3) == 0x3) ? 4 : 2;

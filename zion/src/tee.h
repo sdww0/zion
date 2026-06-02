@@ -166,6 +166,8 @@ struct tee_csr {
 	uintptr_t vstval;
 	uintptr_t hvip;
 	uintptr_t vsatp;
+	uintptr_t henvcfg;
+	uintptr_t menvcfg;
 };
 
 struct tee_thread {

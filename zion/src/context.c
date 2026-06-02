@@ -4,6 +4,7 @@
 #include <sbi/sbi_trap.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_hfence.h>
+#include <sbi/sbi_timer.h>
 #include <sbi/riscv_asm.h>
 #include "context.h"
 #include "cvm.h"
@@ -11,6 +12,13 @@
 #include "pmp.h"
 
 extern int tee_region_id;
+
+/* Per-hart saved host timer compare value.
+ * Saved before enclave entry (which pushes mtimecmp far ahead)
+ * and restored on enclave exit so the host kernel's timer events
+ * are not lost. */
+#define TEE_MAX_HARTS 16
+static u64 saved_mtimecmp[TEE_MAX_HARTS] = {0};
 
 #define GUEST_ARG_REG_LIST(_) \
 	_(a0)                 \
@@ -88,13 +96,27 @@ static const unsigned long cvm_hedeleg =
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
 	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
 
-/* ENCLAVE - Keystone approach: mideleg=0, all interrupts to M-mode.
- * medeleg=0: all exceptions trap to M-mode first, then hedeleg decides
- * whether to delegate to VS-mode. If we used medeleg, exceptions would
- * go to HS-mode where there's no handler (stvec=0 → crash). */
+/* ENCLAVE delegation:
+ *
+ * medeleg must include page faults so they reach HS-mode, where hedeleg
+ * can further delegate them to VS-mode (Eyrie's stvec handler).
+ *
+ * Without medeleg bits, page faults stay in M-mode where there is no
+ * VS-mode page fault handler — the runtime's demand-paging and
+ * sbi_stop_enclave(STOP_PAGE_FAULT) path never executes.
+ *
+ * Guest page faults (cause 20/21/23) must NOT be in hedeleg — they
+ * always trap to M-mode for G-stage handling by the SM.
+ *
+ * mideleg=0: all interrupts to M-mode (Keystone pattern). */
 static const unsigned long enclave_mideleg = 0;
 static const unsigned long enclave_hideleg = 0;
-static const unsigned long enclave_medeleg = 0;
+static const unsigned long enclave_medeleg =
+	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
+	(1U << CAUSE_USER_ECALL) |
+	(1U << CAUSE_FETCH_PAGE_FAULT) |
+	(1U << CAUSE_LOAD_PAGE_FAULT) |
+	(1U << CAUSE_STORE_PAGE_FAULT);
 static const unsigned long enclave_hedeleg =
 	(1U << CAUSE_MISALIGNED_FETCH) | (1U << CAUSE_BREAKPOINT) |
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
@@ -319,7 +341,7 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_VSATP, d_csrs->vsatp);
 	} else if (context_mode == REE_TO_ENCLAVE) {
 		/* Keystone approach: mideleg=0, all interrupts go to M-mode.
-		 * No need to mask mie — the SM catches everything.
+		 * M-timer fires → SM stops enclave → host reprograms timer → resume.
 		 */
 
 		/* Enclave uses VS-mode CSR set, same as CVM */
@@ -337,6 +359,24 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_VSCAUSE, d_csrs->vscause);
 		csr_write(CSR_VSTVAL, d_csrs->vstval);
 		csr_write(CSR_VSATP, d_csrs->vsatp);
+
+		/* Save host henvcfg/menvcfg, clear for enclave */
+		LOCAL_SWITCH_CSR(henvcfg);
+		LOCAL_SWITCH_CSR(menvcfg);
+		csr_write(CSR_HENVCFG, 0);
+		csr_write(CSR_MENVCFG, 0);
+
+		/* Save host's timer compare value, then push mtimecmp far
+		 * into the future so M-timer won't fire immediately on
+		 * enclave entry. Without this, if mtime >= mtimecmp
+		 * (e.g., host didn't reprogram timer between stop and
+		 * resume), the timer fires before the enclave executes
+		 * even one instruction, causing an infinite stop/resume loop.
+		 *
+		 * sbi_timer_event_start programs the actual mtimecmp register
+		 * (via ACLINT or Sstc). ~4 billion cycles ≈ 4s at 1GHz. */
+		saved_mtimecmp[current_hartid()] = sbi_timer_event_value();
+		sbi_timer_event_start(sbi_timer_value() + 0x100000000ULL);
 	}
 #undef LOCAL_SWITCH_CSR
 }
@@ -395,6 +435,19 @@ static inline void switch_from_csrs(struct sbi_trap_regs *regs,
 		s_csrs->vstval	   = csr_read_set(CSR_VSTVAL, 0);
 		s_csrs->hvip	   = csr_read_set(CSR_HVIP, 0);
 		s_csrs->vsatp	   = csr_read_set(CSR_VSATP, 0);
+
+		/* Restore host henvcfg/menvcfg */
+		s_csrs->henvcfg    = csr_read_set(CSR_HENVCFG, 0);
+		s_csrs->menvcfg    = csr_read_set(CSR_MENVCFG, 0);
+		csr_write(CSR_HENVCFG, d_csrs->henvcfg);
+		csr_write(CSR_MENVCFG, d_csrs->menvcfg);
+
+		/* Restore host's timer compare value.
+		 * The enclave entry pushed mtimecmp far into the future;
+		 * if we don't restore it, the host kernel's next timer
+		 * event will be delayed by ~4 seconds, causing RCU stalls
+		 * and scheduling freezes. */
+		sbi_timer_event_start(saved_mtimecmp[current_hartid()]);
 	}
 #undef LOCAL_SWITCH_CSR
 }
@@ -412,14 +465,10 @@ static inline void switch_trap_deleg(struct zion_state *state)
 		csr_write(CSR_MEDELEG, cvm_medeleg);
 		csr_write(CSR_HEDELEG, cvm_hedeleg);
 	} else if (state->mode == ENCLAVE) {
-		sbi_printf("[SM] switch_trap_deleg: ENCLAVE, medeleg before=0x%lx mideleg before=0x%lx\n",
-			   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG));
 		csr_write(CSR_MIDELEG, enclave_mideleg);
 		csr_write(CSR_HIDELEG, enclave_hideleg);
 		csr_write(CSR_MEDELEG, enclave_medeleg);
 		csr_write(CSR_HEDELEG, enclave_hedeleg);
-		sbi_printf("[SM] switch_trap_deleg: medeleg after=0x%lx mideleg after=0x%lx\n",
-			   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG));
 	}
 }
 
@@ -435,12 +484,6 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 
 	struct tee_csr *s_csrs = &s_tthread->csrs;
 	struct tee_csr *d_csrs = &d_tthread->csrs;
-
-	zion_printf("Source csrs mstatus: %lx\n", s_csrs->mstatus);
-	zion_printf("Source csrs mepc: %lx\n", s_csrs->mepc);
-
-	zion_printf("Target csrs mstatus: %lx\n", d_csrs->mstatus);
-	zion_printf("Target csrs mepc: %lx\n", d_csrs->mepc);
 
 	hart_enter_context(d_tthread);
 
@@ -460,16 +503,9 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == REE_TO_ENCLAVE) {
 		/* Enclave: switch trap vector, lock PMP, flush TLB */
-		zion_printf("[SM] context: REE_TO_ENCLAVE, mstatus after switch=%lx\n",
-			    regs->mstatus);
-		zion_printf("[SM] context: hgatp csr=%lx hstatus csr=%lx\n",
-			    csr_read(CSR_HGATP), csr_read(CSR_HSTATUS));
-		zion_printf("[SM] context: mepc=%lx mcause(prev)=%lx mtvec=%lx\n",
-			    regs->mepc, csr_read(CSR_MCAUSE), csr_read(CSR_MTVEC));
 		switch_vector_to_tee();
 		pmp_set_keystone(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
-		zion_printf("[SM] context: FINAL mtvec=0x%lx mstatus=0x%lx", csr_read(CSR_MTVEC), csr_read(CSR_MSTATUS));
 	}
 	switch_trap_deleg(&d_tthread->state);
 }
@@ -499,14 +535,10 @@ void context_switch_from(struct sbi_trap_regs *regs,
 		pmp_set_keystone(tee_region_id, PMP_NO_PERM);
 		__sbi_hfence_gvma_all();
 	} else if (context_mode == REE_FROM_ENCLAVE) {
-
-		sbi_printf("[SM] context_switch_from: REE_FROM_ENCLAVE, switching vector and PMP\n");
 		switch_vector_to_ree();
 		pmp_set_keystone(tee_region_id, PMP_NO_PERM);
 		__sbi_hfence_gvma_all();
-		sbi_printf("[SM] context_switch_from: REE_FROM_ENCLAVE done, switching trap_deleg\n");
 	} else if (context_mode == CVM_FROM_ENCLAVE) {
-
 		__sbi_hfence_gvma_all();
 	}
 	switch_trap_deleg(&d_tthread->state);
@@ -514,7 +546,27 @@ void context_switch_from(struct sbi_trap_regs *regs,
 	switch_gprs(regs, s_gprs, d_gprs, return_on_resume);
 	switch_from_csrs(regs, s_csrs, d_csrs, context_mode);
 
-	if (context_mode == REE_FROM_ENCLAVE)
-		sbi_printf("[SM] context_switch_from: COMPLETE, mepc=0x%lx mstatus=0x%lx\n",
-			   regs->mepc, regs->mstatus);
+	/* Forward pending M-mode interrupts as S-mode interrupts so the
+	 * host kernel sees them.  During enclave, mideleg=0 means all
+	 * interrupts went to M-mode.
+	 *
+	 * Timer: mtimecmp was already restored by switch_from_csrs above.
+	 * If the host's timer has expired, MTIP will be set and will fire
+	 * as an M-mode trap on mret. OpenSBI's sbi_timer_process() then
+	 * forwards it to S-mode. No need to manually forward MTIP→STIP
+	 * (MTIP is read-only in MIP — csr_clear is a no-op).
+	 *
+	 * Software: MSIP is writable; forward to SSIP for S-mode delivery.
+	 * External: MEIP is read-only; inject SEIP so the host sees it. */
+	if (context_mode == REE_FROM_ENCLAVE) {
+		uintptr_t pending = csr_read(CSR_MIP);
+		if (pending & MIP_MSIP) {
+			csr_clear(CSR_MIP, MIP_MSIP);
+			csr_set(CSR_MIP, MIP_SSIP);
+		}
+		if (pending & MIP_MEIP) {
+			/* MEIP is read-only; just inject SEIP */
+			csr_set(CSR_MIP, MIP_SEIP);
+		}
+	}
 }
