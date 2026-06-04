@@ -87,8 +87,8 @@ static uint64_t setup_enclave_vsatp(struct runtime_params_t *p)
 	va_l3[511] = VS_LEAF_PTE(rt_mega, leaf);
 
 	uint64_t vsatp = SATP_MODE_SV48 | ((uint64_t)root_pt >> PAGE_SHIFT);
-	tee_log("[SM] vsatp: root=0x%lx runtime=0x%lx id[%lu] vsatp=0x%lx\n",
-		   root_pt, p->runtime_base, id_vpn2, vsatp);
+	//tee_log("[SM] vsatp: root=0x%lx runtime=0x%lx id[%lu] vsatp=0x%lx\n",
+	//	   root_pt, p->runtime_base, id_vpn2, vsatp);
 	return vsatp;
 }
 
@@ -346,32 +346,32 @@ unsigned long create_enclave(unsigned long *eidptr,
 	}
 
 	/* ---- Copy EPM content from driver-allocated PA → secure pool ---- */
-	tee_log("[SM] create_enclave: EPM copy: epm_pa=0x%lx n_blocks=%d block_size=0x%lx\n",
-		   epm_pa, n_blocks, BLOCK_SIZE);
+	//tee_log("[SM] create_enclave: EPM copy: epm_pa=0x%lx n_blocks=%d block_size=0x%lx\n",
+	//	   epm_pa, n_blocks, BLOCK_SIZE);
 	/* GPA may not be BLOCK_SIZE-aligned (2MB). map_gpa_to_hpa uses megapages,
 	 * which auto-align to 2MB. Data must go to the correct offset within
 	 * the megapage: block_base + (epm_pa % BLOCK_SIZE). */
 	uintptr_t gpa_offset = epm_pa & (BLOCK_SIZE - 1);
-	tee_log("[SM]   gpa_offset=0x%lx within megapage\n", gpa_offset);
+	//tee_log("[SM]   gpa_offset=0x%lx within megapage\n", gpa_offset);
 	for (int i = 0; i < n_blocks; i++) {
 		size_t chunk = (i == n_blocks - 1) ?
 			       (epm_size - i * BLOCK_SIZE) : BLOCK_SIZE;
 		uintptr_t src = epm_pa + i * BLOCK_SIZE;
 		/* dst must account for GPA offset within the 2MB megapage */
 		uintptr_t dst = epm_blocks[i] + gpa_offset;
-		tee_log("[SM]   block[%d]: src=0x%lx dst=0x%lx chunk=0x%lx\n",
-			   i, src, dst, chunk);
-		tee_log("[SM]   src[0..3]: %08x %08x %08x %08x\n",
-			   ((volatile uint32_t *)src)[0],
-			   ((volatile uint32_t *)src)[1],
-			   ((volatile uint32_t *)src)[2],
-			   ((volatile uint32_t *)src)[3]);
+		//tee_log("[SM]   block[%d]: src=0x%lx dst=0x%lx chunk=0x%lx\n",
+		//	   i, src, dst, chunk);
+		//tee_log("[SM]   src[0..3]: %08x %08x %08x %08x\n",
+		//	   ((volatile uint32_t *)src)[0],
+		//	   ((volatile uint32_t *)src)[1],
+		//	   ((volatile uint32_t *)src)[2],
+		//	   ((volatile uint32_t *)src)[3]);
 		sbi_memcpy((void *)dst, (void *)src, chunk);
-		tee_log("[SM]   dst[0..3]: %08x %08x %08x %08x\n",
-			   ((volatile uint32_t *)dst)[0],
-			   ((volatile uint32_t *)dst)[1],
-			   ((volatile uint32_t *)dst)[2],
-			   ((volatile uint32_t *)dst)[3]);
+		//tee_log("[SM]   dst[0..3]: %08x %08x %08x %08x\n",
+		//	   ((volatile uint32_t *)dst)[0],
+		//	   ((volatile uint32_t *)dst)[1],
+		//	   ((volatile uint32_t *)dst)[2],
+		//	   ((volatile uint32_t *)dst)[3]);
 	}
 
 	/* ---- Build G-stage page table ---- */
@@ -405,24 +405,24 @@ unsigned long create_enclave(unsigned long *eidptr,
 		 (HGATP_MODE_SV48X4 << HGATP_MODE_SHIFT);
 
 	/* ---- Verify G-stage mapping ---- */
-	tee_log("[SM] create_enclave: G-stage verification (root_pt=0x%lx):\n",
-		   (unsigned long)root_pt);
+	//tee_log("[SM] create_enclave: G-stage verification (root_pt=0x%lx):\n",
+	//	   (unsigned long)root_pt);
 	for (int i = 0; i < n_blocks; i++) {
 		uint64_t gpa = epm_pa + (uint64_t)i * BLOCK_SIZE;
 		/* EPM uses 2MB megapage → leaf at level 1 */
 		pte_t *entry = get_pte_entry(NULL, (pte_t *)root_pt, gpa,
 					     false, 0, 1, CVM_GSTAGE_MODE);
 		if (entry && (*entry & PTE_V)) {
-			uint64_t hpa = ((*entry >> ZION_PTE_PPN_SHIFT)
-					& 0xFFFFFFFFFFFULL) << PAGE_SHIFT;
-			tee_log("[SM]   GPA 0x%lx → HPA 0x%lx (pte=0x%lx)\n",
-				   gpa, hpa, (unsigned long)*entry);
+			//uint64_t hpa = ((*entry >> ZION_PTE_PPN_SHIFT)
+			//		& 0xFFFFFFFFFFFULL) << PAGE_SHIFT;
+			//tee_log("[SM]   GPA 0x%lx → HPA 0x%lx (pte=0x%lx)\n",
+			//	   gpa, hpa, (unsigned long)*entry);
 		} else {
-			tee_log("[SM]   GPA 0x%lx → INVALID\n", gpa);
+			//tee_log("[SM]   GPA 0x%lx → INVALID\n", gpa);
 		}
 	}
-	tee_log("[SM] create_enclave: dram_base=0x%lx user_paddr=0x%lx runtime_paddr=0x%lx\n",
-		   epm_pa, create_args.user_paddr, create_args.runtime_paddr);
+	//tee_log("[SM] create_enclave: dram_base=0x%lx user_paddr=0x%lx runtime_paddr=0x%lx\n",
+	//	   epm_pa, create_args.user_paddr, create_args.runtime_paddr);
 
 	/* ---- Fill enclave metadata ---- */
 	enclaves[eid].eid = eid;
@@ -532,38 +532,38 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	uintptr_t sp = p->free_base + p->free_requested; /* stack at top of free */
 	uintptr_t arg0 = p->dram_base; /* Eyrie expects dram_base in a0 */
 
-	tee_log("[SM] run_enclave: eid=%d entry=0x%lx dram_base=0x%lx runtime=0x%lx\n",
-		   eid, entry, p->dram_base, p->runtime_base);
-	tee_log("[SM]   dram_size=0x%lx user=0x%lx free=0x%lx utm=0x%lx\n",
-		   p->dram_size, p->user_base, p->free_base, p->untrusted_base);
+	//tee_log("[SM] run_enclave: eid=%d entry=0x%lx dram_base=0x%lx runtime=0x%lx\n",
+	//	   eid, entry, p->dram_base, p->runtime_base);
+	//tee_log("[SM]   dram_size=0x%lx user=0x%lx free=0x%lx utm=0x%lx\n",
+	//	   p->dram_size, p->user_base, p->free_base, p->untrusted_base);
 
 	setup_enclave_thread(thread, &enclaves[eid], entry, sp, arg0, eid);
 
-	tee_log("[SM] ===== ENCLAVE FIRST ENTRY =====\n");
-	tee_log("[SM] CSRs: mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
-		   thread->csrs.mepc, thread->csrs.mstatus, thread->csrs.hstatus);
-	tee_log("[SM] CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx vsstatus=0x%lx\n",
-		   thread->csrs.hgatp, thread->csrs.hcounteren,
-		   thread->csrs.vsatp, thread->csrs.vsstatus);
-	tee_log("[SM] CSRs: vstvec=0x%lx vsscratch=0x%lx vsepc=0x%lx vscause=0x%lx\n",
-		   thread->csrs.vstvec, thread->csrs.vsscratch,
-		   thread->csrs.vsepc, thread->csrs.vscause);
-	tee_log("[SM] GPRs: sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx\n",
-		   thread->gprs.sp, thread->gprs.a0,
-		   thread->gprs.a1, thread->gprs.a2);
-	tee_log("[SM] GPRs: a3=0x%lx a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-		   thread->gprs.a3, thread->gprs.a4, thread->gprs.a5,
-		   thread->gprs.a6, thread->gprs.a7);
-	tee_log("[SM] Params: dram=0x%lx size=0x%lx runtime=0x%lx user=0x%lx\n",
-		   p->dram_base, p->dram_size, p->runtime_base, p->user_base);
-	tee_log("[SM] Params: free=0x%lx utm=0x%lx utm_size=0x%lx\n",
-		   p->free_base, p->untrusted_base, p->untrusted_size);
-	tee_log("[SM] =================================\n");
+	//tee_log("[SM] ===== ENCLAVE FIRST ENTRY =====\n");
+	//tee_log("[SM] CSRs: mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
+	//	   thread->csrs.mepc, thread->csrs.mstatus, thread->csrs.hstatus);
+	//tee_log("[SM] CSRs: hgatp=0x%lx hcounteren=0x%lx vsatp=0x%lx vsstatus=0x%lx\n",
+	//	   thread->csrs.hgatp, thread->csrs.hcounteren,
+	//	   thread->csrs.vsatp, thread->csrs.vsstatus);
+	//tee_log("[SM] CSRs: vstvec=0x%lx vsscratch=0x%lx vsepc=0x%lx vscause=0x%lx\n",
+	//	   thread->csrs.vstvec, thread->csrs.vsscratch,
+	//	   thread->csrs.vsepc, thread->csrs.vscause);
+	//tee_log("[SM] GPRs: sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx\n",
+	//	   thread->gprs.sp, thread->gprs.a0,
+	//	   thread->gprs.a1, thread->gprs.a2);
+	//tee_log("[SM] GPRs: a3=0x%lx a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+	//	   thread->gprs.a3, thread->gprs.a4, thread->gprs.a5,
+	//	   thread->gprs.a6, thread->gprs.a7);
+	//tee_log("[SM] Params: dram=0x%lx size=0x%lx runtime=0x%lx user=0x%lx\n",
+	//	   p->dram_base, p->dram_size, p->runtime_base, p->user_base);
+	//tee_log("[SM] Params: free=0x%lx utm=0x%lx utm_size=0x%lx\n",
+	//	   p->free_base, p->untrusted_base, p->untrusted_size);
+	//tee_log("[SM] =================================\n");
 
 	enclaves[eid].active_thread = thread;
 	cpu_enter_enclave_context(eid);
-	tee_log("[SM] run_enclave: eid=%d entry=0x%lx sp=0x%lx\n",
-		   eid, entry, sp);
+	//tee_log("[SM] run_enclave: eid=%d entry=0x%lx sp=0x%lx\n",
+	//	   eid, entry, sp);
 
 	/*
 	 * Switch context: host → enclave.
