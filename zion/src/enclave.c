@@ -460,8 +460,8 @@ unsigned long create_enclave(unsigned long *eidptr,
 	spin_unlock(&encl_lock);
 
 	*eidptr = eid;
-	tee_log("[SM] create_enclave: eid=%d epm_gpa=0x%lx size=0x%lx hgatp=0x%lx\n",
-		   eid, epm_pa, epm_size, hgatp);
+	//tee_log("[SM] create_enclave: eid=%d epm_gpa=0x%lx size=0x%lx hgatp=0x%lx\n",
+	//	   eid, epm_pa, epm_size, hgatp);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 
 free_blocks:
@@ -499,7 +499,7 @@ unsigned long destroy_enclave(enclave_id eid)
 	reset_enclave_pt_pool(&g_mem_pool, (uint32_t)eid);
 
 	encl_free_eid(eid);
-	tee_log("[SM] destroy_enclave: eid=%d destroyed\n", eid);
+	//tee_log("[SM] destroy_enclave: eid=%d destroyed\n", eid);
 	return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
