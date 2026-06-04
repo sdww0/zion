@@ -611,7 +611,8 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
   return SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
-unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
+unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid,
+			   unsigned long exit_cause)
 {
   int exitable;
 
@@ -631,7 +632,7 @@ unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 
   context_switch_to_host(regs, eid, 0);
 
-  return SBI_ERR_SM_ENCLAVE_SUCCESS;
+  return exit_cause ? exit_cause : SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
 unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request, enclave_id eid)

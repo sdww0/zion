@@ -8,7 +8,10 @@
  *
  * Convention: SM error codes (100000+) are returned via retval (a0).
  * out->value (a1) carries the result (enclave ID, etc.).
- * Functions that do tee_mret never return (RUN/RESUME/STOP/EXIT).
+ *
+ * RUN/RESUME: set out->skip_regs_update = true on success so that
+ *   sbi_ecall_handler doesn't overwrite regs (already switched to enclave).
+ * EXIT/STOP: return normally; sbi_ecall_handler sets regs->a0/mepc.
  */
 
 #include <sbi/sbi_ecall.h>
@@ -40,11 +43,13 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 		break;
 	case SBI_SM_RUN_ENCLAVE:
 		retval = sbi_sm_run_enclave(regs, (uintptr_t)regs->a0);
-		__builtin_unreachable();
+		if (!retval)
+			out->skip_regs_update = true;
 		break;
 	case SBI_SM_RESUME_ENCLAVE:
 		retval = sbi_sm_resume_enclave(regs, (uintptr_t)regs->a0);
-		__builtin_unreachable();
+		if (!retval)
+			out->skip_regs_update = true;
 		break;
 	case SBI_SM_RANDOM:
 		out->value = sbi_sm_random();
@@ -58,12 +63,14 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 		break;
 	case SBI_SM_STOP_ENCLAVE:
 		retval = sbi_sm_stop_enclave(regs, regs->a0);
-		__builtin_unreachable();
 		break;
-	case SBI_SM_EXIT_ENCLAVE:
-		retval = sbi_sm_exit_enclave(regs, regs->a0);
-		__builtin_unreachable();
+	case SBI_SM_EXIT_ENCLAVE: {
+		/* Capture enclave retval before exit_enclave switches regs to host */
+		unsigned long enclave_retval = regs->a0;
+		retval = sbi_sm_exit_enclave(regs, enclave_retval);
+		out->value = enclave_retval;
 		break;
+	}
 	case SBI_SM_CALL_PLUGIN:
 		retval = sbi_sm_call_plugin(regs->a0, regs->a1, regs->a2, regs->a3);
 		break;

@@ -56,7 +56,7 @@ unsigned long sbi_sm_resume_enclave(struct sbi_trap_regs *regs, unsigned long ei
 
 unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs, unsigned long retval)
 {
-  regs->a0 = exit_enclave(regs, cpu_get_enclave_id());
+  regs->a0 = exit_enclave(regs, cpu_get_enclave_id(), 0);
   regs->a1 = retval;
   regs->mepc += 4;
   sbi_trap_exit(regs);

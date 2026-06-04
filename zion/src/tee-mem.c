@@ -527,7 +527,13 @@ void tee_security_check(unsigned long mtval, unsigned long mcause,
 int tee_mem_init(uint8_t *mem_base, uint32_t n_page)
 {
 
-	sbi_memset((void *)mem_base, 0, n_page * PAGE_SIZE);
+	/* Do NOT memset the region here — it is still owned by the kernel
+	 * (memmap= reservation is not supported on this kernel / arch).
+	 * The PMP lock (applied later by the enclave create path) is the
+	 * real isolation boundary; G-stage page tables provide the primary
+	 * protection for enclave/CVM memory.  Zeroing the region will be
+	 * done by the enclave init code once the PMP lock is active. */
+	//sbi_memset((void *)mem_base, 0, n_page * PAGE_SIZE);
 
 	init_mem_pool(&g_mem_pool, mem_base, n_page, data_blocks_arr,
 		      MAX_DATA_BLOCKS);

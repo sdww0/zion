@@ -168,6 +168,19 @@ struct tee_csr {
 	uintptr_t vsatp;
 	uintptr_t henvcfg;
 	uintptr_t menvcfg;
+
+	/* S-mode CSRs (HS-mode in H extension context).
+	 * Keystone saves/restores these to prevent SM's M-mode trap
+	 * handling from corrupting the host's S-mode state. */
+	uintptr_t sstatus;
+	uintptr_t sie;
+	uintptr_t stvec;
+	uintptr_t sscratch;
+	uintptr_t sepc;
+	uintptr_t scause;
+	uintptr_t stval;
+	uintptr_t sip;
+	uintptr_t satp;
 };
 
 struct tee_thread {

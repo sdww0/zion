@@ -58,8 +58,7 @@ void zion_init(bool cold_boot)
 	if (cold_boot)
 		tee_log("[SBI] sstc disabled on all harts\n");
 
-	/* Enable counters */
-	csr_write(CSR_MCOUNTINHIBIT, 0);
+	/* Enable counters (skip mcountinhibit — not supported by QEMU) */
 	csr_write(CSR_MCOUNTEREN, 0x7);
 	csr_write(CSR_SCOUNTEREN, 0x7);
 
@@ -69,7 +68,7 @@ void zion_init(bool cold_boot)
 
 void zion_enable_counters(void)
 {
-	csr_write(CSR_MCOUNTINHIBIT, 0);
+	/* mcountinhibit CSR (0x320) is optional and not supported by QEMU */
 	csr_write(CSR_MCOUNTEREN, 0x7);
 	csr_write(CSR_SCOUNTEREN, 0x7);
 }

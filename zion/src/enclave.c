@@ -409,28 +409,16 @@ unsigned long create_enclave(unsigned long *eidptr,
 		   (unsigned long)root_pt);
 	for (int i = 0; i < n_blocks; i++) {
 		uint64_t gpa = epm_pa + (uint64_t)i * BLOCK_SIZE;
-		/* Walk G-stage: level 3 (11-bit index) → level 0 */
-		pte_t *pt = (pte_t *)root_pt;
-		pte_t pte = 0;
-		for (int lvl = 3; lvl >= 1; lvl--) {
-			uint64_t idx;
-			if (lvl == 3)
-				idx = (gpa >> 39) & 0x7FF;
-			else
-				idx = (gpa >> (12 + lvl * 9)) & 0x1FF;
-			pte = pt[idx];
-			if (!(pte & PTE_V)) {
-				tee_log("[SM]   G L%d[%lu] INVALID\n", lvl, idx);
-				break;
-			}
-			pt = (pte_t *)(((pte >> 10) & 0xFFFFFFFFFFFULL) << 12);
-		}
-		if (pte & PTE_V) {
-			uint64_t idx = (gpa >> 12) & 0x1FF;
-			pte = pt[idx];
-			uint64_t hpa = ((pte >> 10) & 0xFFFFFFFFFFFULL) << 12;
+		/* EPM uses 2MB megapage → leaf at level 1 */
+		pte_t *entry = get_pte_entry(NULL, (pte_t *)root_pt, gpa,
+					     false, 0, 1, CVM_GSTAGE_MODE);
+		if (entry && (*entry & PTE_V)) {
+			uint64_t hpa = ((*entry >> ZION_PTE_PPN_SHIFT)
+					& 0xFFFFFFFFFFFULL) << PAGE_SHIFT;
 			tee_log("[SM]   GPA 0x%lx → HPA 0x%lx (pte=0x%lx)\n",
-				   gpa, hpa, (unsigned long)pte);
+				   gpa, hpa, (unsigned long)*entry);
+		} else {
+			tee_log("[SM]   GPA 0x%lx → INVALID\n", gpa);
 		}
 	}
 	tee_log("[SM] create_enclave: dram_base=0x%lx user_paddr=0x%lx runtime_paddr=0x%lx\n",
@@ -582,7 +570,10 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	 * context_switch_to saves host state, loads enclave state into regs,
 	 * switches trap vector, sets PMP, loads hgatp.
 	 * After this returns, regs contains the enclave's state.
-	 * When OpenSBI does mret, execution enters the enclave.
+	 * The caller (tee-sbi-opensbi.c) sets out->skip_regs_update = true
+	 * so sbi_ecall_handler won't overwrite regs->a0/mepc.
+	 * OpenSBI's assembly trap exit path restores regs and mrets into
+	 * VS-mode (enclave), exactly like CVM's enter_cvm() path.
 	 */
 	context_switch_to(regs,
 			  /* src = current host context */
@@ -592,48 +583,11 @@ unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 			  REE_TO_ENCLAVE,
 			  0, NULL, NULL);
 
-	tee_log("[SM] entering enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
-		   regs->mepc, regs->mstatus);
-
-	tee_log("[SM] ===== REE->ENCLAVE REG DUMP =====\n");
-	tee_log("[SM]   mepc=0x%lx mstatus=0x%lx mpp=%lu mpv=%lu sie=%lu\n",
-		   regs->mepc, regs->mstatus,
-		   (regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT,
-		   (regs->mstatus & MSTATUS_MPV) >> 39,
-		   (regs->mstatus & MSTATUS_SIE) >> 1);
-	tee_log("[SM]   hgatp=0x%lx hstatus=0x%lx mtvec=0x%lx\n",
-		   csr_read(CSR_HGATP), csr_read(CSR_HSTATUS),
-		   csr_read(CSR_MTVEC));
-	tee_log("[SM]   medeleg=0x%lx mideleg=0x%lx mie=0x%lx\n",
-		   csr_read(CSR_MEDELEG), csr_read(CSR_MIDELEG),
-		   csr_read(CSR_MIE));
-	tee_log("[SM]   hideleg=0x%lx hedeleg=0x%lx\n",
-		   csr_read(CSR_HIDELEG), csr_read(CSR_HEDELEG));
-	tee_log("[SM]   satp=0x%lx sscratch=0x%lx stvec=0x%lx\n",
-		   csr_read(CSR_SATP), csr_read(CSR_SSCRATCH),
-		   csr_read(CSR_STVEC));
-	tee_log("[SM]   vsstatus=0x%lx vsatp=0x%lx vstvec=0x%lx\n",
-		   csr_read(CSR_VSSTATUS), csr_read(CSR_VSATP),
-		   csr_read(CSR_VSTVEC));
-	tee_log("[SM]   GPRs: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-		   regs->a0, regs->a1, regs->a2, regs->a3);
-	tee_log("[SM]   GPRs: a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
-		   regs->a4, regs->a5, regs->a6, regs->a7);
-	tee_log("[SM]   GPRs: sp=0x%lx ra=0x%lx gp=0x%lx tp=0x%lx\n",
-		   regs->sp, regs->ra, regs->gp, regs->tp);
-	tee_log("[SM]   GPRs: t0=0x%lx t1=0x%lx t2=0x%lx s0=0x%lx\n",
-		   regs->t0, regs->t1, regs->t2, regs->s0);
-	tee_log("[SM] ===== REE->ENCLAVE DUMP END =====\n");
-
-	/* Direct mret — bypass OpenSBI sbi_trap_exit which clears MPV.
-	 * context_switch_to already set all CSRs (hstatus, hgatp, mtvec).
-	 * We just restore GPRs + mstatus + mepc and mret into VS-mode.
-	 * This function never returns. */
-	tee_mret(regs);
-	__builtin_unreachable();
+	return 0;
 }
 
-unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
+unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid,
+			   unsigned long exit_cause)
 {
 	spin_lock(&encl_lock);
 	if (enclaves[eid].state != RUNNING) {
@@ -660,7 +614,7 @@ unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	tee_thread_free(encl_thread);
 	enclaves[eid].active_thread = NULL;
 
-	return SBI_ERR_SM_ENCLAVE_SUCCESS;
+	return exit_cause ? exit_cause : SBI_ERR_SM_ENCLAVE_SUCCESS;
 }
 
 unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request,
@@ -689,12 +643,11 @@ unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request,
 	 * into encl_thread->csrs.mepc, but we also stash it here for resume. */
 	enclaves[eid].saved_mepc = encl_thread->csrs.mepc;
 
-	/* Fix mstatus.MPP: hardware sets MPP=M (0b11) on trap to M-mode.
-	 * On resume, mret uses MPP to determine target mode — with MPP=M
-	 * the CPU stays in M-mode instead of VS-mode → illegal instruction.
-	 * Force MPP=S + MPV=1 so mret enters VS-mode (enclave execution mode). */
-	encl_thread->csrs.mstatus &= ~MSTATUS_MPP;
-	encl_thread->csrs.mstatus |= (PRV_S << MSTATUS_MPP_SHIFT) | MSTATUS_MPV;
+	/* Set MPV=1 so mret enters virtual mode (VS or VU depending on MPP).
+	 * Do NOT modify MPP — hardware already set it to the correct privilege
+	 * level at trap time (S for VS-mode, U for VU-mode).  The enclave's
+	 * EAPP runs in U-mode, so MPP=0 is valid and must be preserved. */
+	encl_thread->csrs.mstatus |= MSTATUS_MPV;
 
 	/* Keep active_thread alive — resume will reuse it */
 
@@ -733,26 +686,22 @@ unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid)
 	thread->csrs.mepc = enclaves[eid].saved_mepc;
 
 	/*
-	 * Don't reset sp — Eyrie's stack is active, switch_from_csrs
-	 * already saved stop-time sp into encl_thread->gprs.sp.
-	 * Reset a0 only (Eyrie treats dram_base as a constant).
+	 * Don't reset sp or a0 — Eyrie's stack and register state are
+	 * active.  switch_gprs (via stop_enclave) already saved the
+	 * enclave's running-state GPRs into encl_thread->gprs.
+	 * Blindly overwriting a0 breaks code that uses a0 for something
+	 * other than dram_base (e.g. loader-binary's elf32_checkFile
+	 * receives an elf_t* struct pointer in a0).
 	 */
-	struct runtime_params_t *p = &enclaves[eid].params;
-	thread->gprs.a0 = p->dram_base;
 
 	cpu_enter_enclave_context(eid);
-	tee_log("[SM] resume_enclave: eid=%d mepc=0x%lx\n",
-		   eid, thread->csrs.mepc);
+	// tee_log("[SM] resume_enclave: eid=%d mepc=0x%lx\n",
+	// 	   eid, thread->csrs.mepc);
 
 	context_switch_to(regs, &tee_threads[0], thread,
 			  REE_TO_ENCLAVE, 0, NULL, NULL);
 
-	/* Direct mret into enclave — same as run_enclave.
-	 * MUST bypass OpenSBI sbi_trap_exit which clears MPV. */
-	tee_log("[SM] resuming enclave via tee_mret: mepc=0x%lx mstatus=0x%lx\n",
-		   regs->mepc, regs->mstatus);
-	tee_mret(regs);
-	__builtin_unreachable();
+	return 0;
 }
 
 /* ---- Attestation (stubs — full implementation TBD) ---- */
@@ -795,47 +744,32 @@ unsigned long sbi_sm_destroy_enclave(unsigned long eid)
 }
 
 unsigned long sbi_sm_run_enclave(struct sbi_trap_regs *regs,
-			 unsigned long eid)
+				 unsigned long eid)
 {
 	return run_enclave(regs, (enclave_id)eid);
-	/* On success, run_enclave calls tee_mret and never returns.
-	 * On failure, it returns an error code to the host. */
 }
 
 unsigned long sbi_sm_resume_enclave(struct sbi_trap_regs *regs,
 				    unsigned long eid)
 {
-	unsigned long ret = resume_enclave(regs, (enclave_id)eid);
-	/* On success, resume_enclave calls tee_mret and never returns.
-	 * On failure, return error to host via tee_mret (same as stop_enclave). */
-	regs->a0 = ret;
-	regs->mepc += 4;
-	tee_mret(regs);
-	__builtin_unreachable();
-	return 0;
+	return resume_enclave(regs, (enclave_id)eid);
 }
 
 unsigned long sbi_sm_exit_enclave(struct sbi_trap_regs *regs,
 				  unsigned long retval)
 {
 	enclave_id eid = (enclave_id)cpu_get_enclave_id();
-	regs->a0 = exit_enclave(regs, eid);
-	regs->a1 = retval;
-	regs->mepc += 4;
-	tee_mret(regs);
-	__builtin_unreachable();
-	return 0;
+	return exit_enclave(regs, eid, 0); /* 0 = clean exit */
 }
 
 unsigned long sbi_sm_stop_enclave(struct sbi_trap_regs *regs,
 				  unsigned long request)
 {
 	enclave_id eid = (enclave_id)cpu_get_enclave_id();
-	regs->a0 = stop_enclave(regs, request, eid);
-	regs->mepc += 4;
-	tee_mret(regs);
-	__builtin_unreachable();
-	return 0;
+	/* stop_enclave switches regs to host context.
+	 * sbi_ecall_handler will set regs->a0 = ret, regs->mepc += 4.
+	 * The return value tells the host why the enclave stopped. */
+	return stop_enclave(regs, request, eid);
 }
 
 unsigned long sbi_sm_attest_enclave(uintptr_t report, uintptr_t data,

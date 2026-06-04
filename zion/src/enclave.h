@@ -133,7 +133,8 @@ unsigned long destroy_enclave(enclave_id eid);
 unsigned long run_enclave(struct sbi_trap_regs *regs, enclave_id eid);
 unsigned long resume_enclave(struct sbi_trap_regs *regs, enclave_id eid);
 // callables from the enclave
-unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid);
+unsigned long exit_enclave(struct sbi_trap_regs *regs, enclave_id eid,
+			   unsigned long exit_cause);
 unsigned long stop_enclave(struct sbi_trap_regs *regs, uint64_t request, enclave_id eid);
 unsigned long attest_enclave(uintptr_t report, uintptr_t data, uintptr_t size, enclave_id eid);
 // attestation

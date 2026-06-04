@@ -13,13 +13,6 @@
 
 extern int tee_region_id;
 
-/* Per-hart saved host timer compare value.
- * Saved before enclave entry (which pushes mtimecmp far ahead)
- * and restored on enclave exit so the host kernel's timer events
- * are not lost. */
-#define TEE_MAX_HARTS 16
-static u64 saved_mtimecmp[TEE_MAX_HARTS] = {0};
-
 #define GUEST_ARG_REG_LIST(_) \
 	_(a0)                 \
 	_(a1)                 \
@@ -366,17 +359,18 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_HENVCFG, 0);
 		csr_write(CSR_MENVCFG, 0);
 
-		/* Save host's timer compare value, then push mtimecmp far
-		 * into the future so M-timer won't fire immediately on
-		 * enclave entry. Without this, if mtime >= mtimecmp
-		 * (e.g., host didn't reprogram timer between stop and
-		 * resume), the timer fires before the enclave executes
-		 * even one instruction, causing an infinite stop/resume loop.
-		 *
-		 * sbi_timer_event_start programs the actual mtimecmp register
-		 * (via ACLINT or Sstc). ~4 billion cycles ≈ 4s at 1GHz. */
-		saved_mtimecmp[current_hartid()] = sbi_timer_event_value();
-		sbi_timer_event_start(sbi_timer_value() + 0x100000000ULL);
+		/* Save host S-mode CSRs (Keystone pattern).
+		 * M-mode trap handling may modify these; without save/restore
+		 * the host's S-mode state would be corrupted. */
+		LOCAL_SWITCH_CSR(sstatus);
+		LOCAL_SWITCH_CSR(sie);
+		LOCAL_SWITCH_CSR(stvec);
+		LOCAL_SWITCH_CSR(sscratch);
+		LOCAL_SWITCH_CSR(sepc);
+		LOCAL_SWITCH_CSR(scause);
+		LOCAL_SWITCH_CSR(stval);
+		LOCAL_SWITCH_CSR(sip);
+		LOCAL_SWITCH_CSR(satp);
 	}
 #undef LOCAL_SWITCH_CSR
 }
@@ -442,12 +436,27 @@ static inline void switch_from_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_HENVCFG, d_csrs->henvcfg);
 		csr_write(CSR_MENVCFG, d_csrs->menvcfg);
 
-		/* Restore host's timer compare value.
-		 * The enclave entry pushed mtimecmp far into the future;
-		 * if we don't restore it, the host kernel's next timer
-		 * event will be delayed by ~4 seconds, causing RCU stalls
-		 * and scheduling freezes. */
-		sbi_timer_event_start(saved_mtimecmp[current_hartid()]);
+		/* Save enclave S-mode CSRs, restore host S-mode CSRs
+		 * (Keystone pattern — prevents M-mode trap handling from
+		 * corrupting the host's S-mode state). */
+		s_csrs->sstatus    = csr_read_set(CSR_SSTATUS, 0);
+		csr_write(CSR_SSTATUS, d_csrs->sstatus);
+		s_csrs->sie	       = csr_read_set(CSR_SIE, 0);
+		csr_write(CSR_SIE, d_csrs->sie);
+		s_csrs->stvec      = csr_read_set(CSR_STVEC, 0);
+		csr_write(CSR_STVEC, d_csrs->stvec);
+		s_csrs->sscratch   = csr_read_set(CSR_SSCRATCH, 0);
+		csr_write(CSR_SSCRATCH, d_csrs->sscratch);
+		s_csrs->sepc       = csr_read_set(CSR_SEPC, 0);
+		csr_write(CSR_SEPC, d_csrs->sepc);
+		s_csrs->scause     = csr_read_set(CSR_SCAUSE, 0);
+		csr_write(CSR_SCAUSE, d_csrs->scause);
+		s_csrs->stval        = csr_read_set(CSR_STVAL, 0);
+		csr_write(CSR_STVAL, d_csrs->stval);
+		s_csrs->sip	       = csr_read_set(CSR_SIP, 0);
+		csr_write(CSR_SIP, d_csrs->sip);
+		s_csrs->satp       = csr_read_set(CSR_SATP, 0);
+		csr_write(CSR_SATP, d_csrs->satp);
 	}
 #undef LOCAL_SWITCH_CSR
 }
@@ -506,6 +515,35 @@ void context_switch_to(struct sbi_trap_regs *regs, struct tee_thread *s_tthread,
 		switch_vector_to_tee();
 		pmp_set_keystone(tee_region_id, PMP_ALL_PERM);
 		__sbi_hfence_gvma_all();
+
+		/* Dump full register state before entering enclave */
+		// sbi_printf("[SM] === ENCLAVE REGS (after switch) ===\n");
+		// sbi_printf("[SM]   mepc=0x%lx mstatus=0x%lx hstatus=0x%lx\n",
+		// 	regs->mepc, regs->mstatus, d_csrs->hstatus);
+		// sbi_printf("[SM]   hgatp=0x%lx hcounteren=0x%lx\n",
+		// 	d_csrs->hgatp, d_csrs->hcounteren);
+		// sbi_printf("[SM]   vsatp=0x%lx vsstatus=0x%lx vstvec=0x%lx\n",
+		// 	d_csrs->vsatp, d_csrs->vsstatus, d_csrs->vstvec);
+		// sbi_printf("[SM]   vsscratch=0x%lx vsepc=0x%lx vscause=0x%lx vstval=0x%lx\n",
+		// 	d_csrs->vsscratch, d_csrs->vsepc,
+		// 	d_csrs->vscause, d_csrs->vstval);
+		// sbi_printf("[SM]   ra=0x%lx sp=0x%lx gp=0x%lx tp=0x%lx\n",
+		// 	regs->ra, regs->sp, regs->gp, regs->tp);
+		// sbi_printf("[SM]   t0=0x%lx t1=0x%lx t2=0x%lx\n",
+		// 	regs->t0, regs->t1, regs->t2);
+		// sbi_printf("[SM]   s0=0x%lx s1=0x%lx s2=0x%lx s3=0x%lx\n",
+		// 	regs->s0, regs->s1, regs->s2, regs->s3);
+		// sbi_printf("[SM]   s4=0x%lx s5=0x%lx s6=0x%lx s7=0x%lx\n",
+		// 	regs->s4, regs->s5, regs->s6, regs->s7);
+		// sbi_printf("[SM]   s8=0x%lx s9=0x%lx s10=0x%lx s11=0x%lx\n",
+		// 	regs->s8, regs->s9, regs->s10, regs->s11);
+		// sbi_printf("[SM]   a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+		// 	regs->a0, regs->a1, regs->a2, regs->a3);
+		// sbi_printf("[SM]   a4=0x%lx a5=0x%lx a6=0x%lx a7=0x%lx\n",
+		// 	regs->a4, regs->a5, regs->a6, regs->a7);
+		// sbi_printf("[SM]   t3=0x%lx t4=0x%lx t5=0x%lx t6=0x%lx\n",
+		// 	regs->t3, regs->t4, regs->t5, regs->t6);
+		// sbi_printf("[SM] ===================================\n");
 	}
 	switch_trap_deleg(&d_tthread->state);
 }

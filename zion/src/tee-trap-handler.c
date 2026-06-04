@@ -569,7 +569,13 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		switch (interrupt_cause) {
 		case IRQ_M_TIMER:
 			/* M-timer during enclave: stop and return to host.
-			 * This is the standard Keystone preemption mechanism. */
+			 * This is the standard Keystone preemption mechanism.
+			 * Forward M-timer to S-timer: clear MTIP, set STIP.
+			 * Do NOT call sbi_timer_process() — it clears MIE.MTIE
+			 * which disables future M-timer interrupts. Keystone only
+			 * clears the pending bit and sets STIP for host delivery. */
+			csr_clear(CSR_MIP, MIP_MTIP);
+			csr_set(CSR_MIP, MIP_STIP);
 			stop_enclave(regs, STOP_TIMER_INTERRUPT, eid);
 			regs->mepc += 4;
 			regs->a0 = SBI_ERR_SM_ENCLAVE_INTERRUPTED;
@@ -721,26 +727,28 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 			/* Also dump eapp code page for comparison */
 			sbi_printf("[SM] Dumping eapp code page:\n");
 			dump_translation(0x1000);
-			dump_translation(0x2000);
+		dump_translation(0x2000);
 			dump_translation(0x3000);
 			sbi_printf("[SM] === End FATAL dump, exiting enclave ===\n");
 			regs->mepc += 4;
 			deliver_trap_to_ree(regs->mepc - 4, mcause, trap);
-			rc = exit_enclave(regs, eid);
+			rc = exit_enclave(regs, eid,
+					  SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR);
 			regs->mepc += 4;
 		} else {
 			/* Forward standard SBI ecalls to OpenSBI handler.
 			 * sbi_ecall_handler handles mepc internally. */
 			tee_log("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx sepc=0x%lx a0=0x%lx\n",
 				   regs->a7, regs->a6, regs->mepc, regs->a0);
-			rc = sbi_ecall_handler(tcntx);
+		rc = sbi_ecall_handler(tcntx);
 			if (rc) {
 				tee_log("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",
-					   regs->a7, rc);
+					regs->a7, rc);
 				/* Unknown/failed ecall: exit enclave to host */
 				regs->mepc += 4;
 				deliver_trap_to_ree(regs->mepc - 4, mcause, trap);
-				rc = exit_enclave(regs, eid);
+				rc = exit_enclave(regs, eid,
+						  SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR);
 				/* After exit_enclave, regs has host context.
 				 * host mepc = ecall PC (from run_enclave/resume_enclave).
 				 * Must +4 to skip the host's ecall instruction. */
@@ -789,9 +797,10 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 				   fault_addr >= enc->mem_info.utm_base &&
 				   fault_addr < enc->mem_info.utm_base +
 						enc->mem_info.utm_size) {
-				/* UTM fault: exit to host for setup */
-				deliver_trap_to_ree(regs->mepc, mcause, trap);
-				rc = exit_enclave(regs, eid);
+			/* UTM fault: exit to host for setup */
+			deliver_trap_to_ree(regs->mepc, mcause, trap);
+			rc = exit_enclave(regs, eid,
+					  SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR);
 				/* Skip host's ecall instruction */
 				regs->mepc += 4;
 		} else {
@@ -860,6 +869,18 @@ trap_done:
 struct sbi_trap_context *tee_dispatch_trap(struct sbi_trap_context *tcntx)
 {
 	zion_mode mode = hart_get_mode();
+	struct sbi_trap_regs *regs = &tcntx->regs;
+	ulong mcause = tcntx->trap.cause;
+
+	// if (mcause != 10) { /* Skip logging for ecall from M-mode (cause 11) */
+	// 	tee_log("[TEE-TRAP] %s cause=0x%lx mepc=0x%lx mstatus=0x%lx"
+	// 		" mpp=%lu mpv=%lu tval=0x%lx\n",
+	// 		mode == ENCLAVE ? "ENCLAVE" : "CVM",
+	// 		mcause, regs->mepc, regs->mstatus,
+	// 		(unsigned long)((regs->mstatus & MSTATUS_MPP) >> MSTATUS_MPP_SHIFT),
+	// 		(unsigned long)((regs->mstatus & MSTATUS_MPV) >> 39),
+	// 		tcntx->trap.tval);
+	// }
 
 	if (mode == ENCLAVE)
 		return enclave_trap_handler(tcntx);
