@@ -736,11 +736,11 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 					  SBI_ERR_SM_ENCLAVE_UNKNOWN_ERROR);
 			regs->mepc += 4;
 		} else {
-			/* Forward standard SBI ecalls to OpenSBI handler.
-			 * sbi_ecall_handler handles mepc internally. */
-			tee_log("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx sepc=0x%lx a0=0x%lx\n",
-				   regs->a7, regs->a6, regs->mepc, regs->a0);
-		rc = sbi_ecall_handler(tcntx);
+		/* Forward standard SBI ecalls to OpenSBI handler.
+		 * sbi_ecall_handler handles mepc internally. */
+		//tee_log("[SM] forwarding SBI ecall a7=0x%lx a6=0x%lx sepc=0x%lx a0=0x%lx\n",
+		//	   regs->a7, regs->a6, regs->mepc, regs->a0);
+	rc = sbi_ecall_handler(tcntx);
 			if (rc) {
 				tee_log("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",
 					regs->a7, rc);
