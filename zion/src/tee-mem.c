@@ -256,6 +256,10 @@ void free_data_blocks_per_tid(data_pool_t *dp, uint32_t tid)
 		if (b->tid != tid)
 			continue;
 
+		/* Zero block data before returning to free list to prevent
+		 * data leakage to next enclave that allocates this block. */
+		sbi_memset((void *)b->start_addr, 0, b->size);
+
 		/* Unlink from used list (no used-list head, blocks are
 		   standalone when allocated) */
 		b->tid = DATA_BLOCK_FREE_TID;

@@ -489,8 +489,8 @@ unsigned long destroy_enclave(enclave_id eid)
 
 	platform_destroy_enclave(&enclaves[eid]);
 
-	/* TODO: memset blocks before freeing (tee-mem.c: free_data_blocks_per_tid)
-	 * to prevent data leakage to next enclave allocated same blocks. */
+	/* free_data_blocks_per_tid() now zeroes each block before
+	 * returning it to the free list, preventing data leakage. */
 	free_data_blocks_per_tid(&g_mem_pool.data_pool, eid);
 
 	enclaves[eid].hgatp = 0;
