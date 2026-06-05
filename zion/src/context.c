@@ -355,7 +355,8 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 
 		/* Save host henvcfg/menvcfg, clear for enclave */
 		LOCAL_SWITCH_CSR(henvcfg);
-		LOCAL_SWITCH_CSR(menvcfg);
+		s_csrs->menvcfg = csr_read(CSR_MENVCFG);
+		csr_write(CSR_MENVCFG, d_csrs->menvcfg);
 		csr_write(CSR_HENVCFG, 0);
 		csr_write(CSR_MENVCFG, 0);
 

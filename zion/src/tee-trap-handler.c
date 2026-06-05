@@ -22,8 +22,8 @@
 
 #define CVM_SHARED_MEM_FAULT_ADDR_BASE 0x4000000000ULL
 
-/* Enclave path debug logging — comment out to silence */
-#define ENCLAVE_LOG
+/* Enclave path debug logging - enable only for focused debugging. */
+/* #define ENCLAVE_LOG */
 #ifdef ENCLAVE_LOG
 #define encl_printf(...) tee_log(__VA_ARGS__)
 #else
@@ -615,7 +615,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 	 * mstatus.MPV — it sets sstatus.SPV instead.  So we cannot
 	 * rely on MPV to determine whether this exception came from
 	 * the enclave.  Trust the caller_rtid/hart context instead.
-	 *
+	 */
 	/* Log a warning if MPV is unexpectedly clear, but continue. */
 	if (!(regs->mstatus & MSTATUS_MPV)) {
 		encl_printf("[SM] encl_trap: MPV=0, mepc=0x%lx mcause=0x%lx "
@@ -742,7 +742,7 @@ struct sbi_trap_context *enclave_trap_handler(struct sbi_trap_context *tcntx)
 		//	   regs->a7, regs->a6, regs->mepc, regs->a0);
 	rc = sbi_ecall_handler(tcntx);
 			if (rc) {
-				tee_log("[SM] SBI ecall failed: a7=0x%lx rc=%ld, exit\n",
+				tee_log("[SM] SBI ecall failed: a7=0x%lx rc=%d, exit\n",
 					regs->a7, rc);
 				/* Unknown/failed ecall: exit enclave to host */
 				regs->mepc += 4;

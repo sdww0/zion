@@ -58,7 +58,7 @@ void zion_enable_counters(void);
  *
  * Override via CFLAGS: -DZION_DEBUG
  */
-#define ZION_DEBUG
+/* #define ZION_DEBUG */
 
 #ifdef ZION_DEBUG
 #define zion_printf(...) \
