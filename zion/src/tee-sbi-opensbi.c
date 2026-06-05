@@ -29,27 +29,37 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 				 struct sbi_ecall_return *out)
 {
 	int retval = 0;
+	unsigned long sm_ret = 0;
 
 	switch (funcid) {
 	case SBI_SM_RESERVE_MEM:
 		retval = reserve_mem(regs->a1, regs->a2);
 		break;
 	case SBI_SM_CREATE_ENCLAVE:
-		retval = sbi_sm_create_enclave(&out->value,
+		sm_ret = sbi_sm_create_enclave(&out->value,
 					       (uintptr_t)regs->a0);
+		if (sm_ret) {
+			out->value = sm_ret;
+			retval = 0;
+		}
 		break;
 	case SBI_SM_DESTROY_ENCLAVE:
-		retval = sbi_sm_destroy_enclave((uintptr_t)regs->a0);
+		out->value = sbi_sm_destroy_enclave((uintptr_t)regs->a0);
+		retval = 0;
 		break;
 	case SBI_SM_RUN_ENCLAVE:
-		retval = sbi_sm_run_enclave(regs, (uintptr_t)regs->a0);
-		if (!retval)
+		sm_ret = sbi_sm_run_enclave(regs, (uintptr_t)regs->a0);
+		if (!sm_ret)
 			out->skip_regs_update = true;
+		else
+			out->value = sm_ret;
 		break;
 	case SBI_SM_RESUME_ENCLAVE:
-		retval = sbi_sm_resume_enclave(regs, (uintptr_t)regs->a0);
-		if (!retval)
+		sm_ret = sbi_sm_resume_enclave(regs, (uintptr_t)regs->a0);
+		if (!sm_ret)
 			out->skip_regs_update = true;
+		else
+			out->value = sm_ret;
 		break;
 	case SBI_SM_RANDOM:
 		out->value = sbi_sm_random();
