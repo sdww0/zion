@@ -34,6 +34,7 @@
 #define EYRIE_VA_START    0xffffffffc0000000UL
 #define SATP_MODE_SV48    (9UL << 60)
 #define PT_ENTRIES         512
+#define MAX_ENCLAVE_EPM_BLOCKS 64
 
 /* Sv48 PTE: PPN [53:10], flags [9:0] */
 #define VS_PTE_PPN_SHIFT  10
@@ -328,8 +329,8 @@ unsigned long create_enclave(unsigned long *eidptr,
 
 	/* ---- Allocate EPM blocks from secure memory pool ---- */
 	int n_blocks = (epm_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-	uint64_t epm_blocks[16]; /* max 32MB (16 * 2MB) */
-	if (n_blocks > 16) {
+	uint64_t epm_blocks[MAX_ENCLAVE_EPM_BLOCKS];
+	if (n_blocks > MAX_ENCLAVE_EPM_BLOCKS) {
 		ret = SBI_ERR_SM_ENCLAVE_NO_FREE_RESOURCE;
 		goto free_eid;
 	}
