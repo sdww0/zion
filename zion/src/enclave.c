@@ -259,7 +259,8 @@ static void setup_enclave_thread(struct tee_thread *thread,
 	thread->csrs.mstatus = (PRV_S << MSTATUS_MPP_SHIFT) |
 			       MSTATUS_MPV | SSTATUS_FS;
 	thread->csrs.hstatus = HSTATUS_SPV | HSTATUS_VSXL;
-	thread->csrs.hcounteren = 0x7; /* enable cycle/time/inst counters */
+	thread->csrs.scounteren = ZION_COUNTER_ENABLE_MASK;
+	thread->csrs.hcounteren = ZION_COUNTER_ENABLE_MASK;
 	thread->csrs.hgatp = enc->hgatp;
 	thread->csrs.vsatp = 0; /* no S-mode page table initially */
 	thread->csrs.vsstatus = SSTATUS_SUM; /* allow S-mode to access U-mode pages; FP set by runtime */
