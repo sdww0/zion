@@ -72,7 +72,8 @@ static int sbi_ecall_tee_handler(unsigned long extid, unsigned long funcid,
 		retval = sbi_sm_get_sealing_key(regs->a0, regs->a1, regs->a2);
 		break;
 	case SBI_SM_STOP_ENCLAVE:
-		retval = sbi_sm_stop_enclave(regs, regs->a0);
+		out->value = sbi_sm_stop_enclave(regs, regs->a0);
+		retval = 0;
 		break;
 	case SBI_SM_EXIT_ENCLAVE: {
 		/* Capture enclave retval before exit_enclave switches regs to host */
