@@ -10,8 +10,11 @@
 #include "cvm.h"
 #include "ree.h"
 #include "pmp.h"
+#include "tee.h"
 
 extern int tee_region_id;
+extern unsigned long csr_support;
+
 
 #define GUEST_ARG_REG_LIST(_) \
 	_(a0)                 \
@@ -354,11 +357,20 @@ static inline void switch_to_csrs(struct sbi_trap_regs *regs,
 		csr_write(CSR_VSATP, d_csrs->vsatp);
 
 		/* Save host henvcfg/menvcfg, clear for enclave */
-		LOCAL_SWITCH_CSR(henvcfg);
-		s_csrs->menvcfg = csr_read(CSR_MENVCFG);
-		csr_write(CSR_MENVCFG, d_csrs->menvcfg);
-		csr_write(CSR_HENVCFG, 0);
-		csr_write(CSR_MENVCFG, 0);
+		if(csr_support & CSR_HENVCFG_SUPPORT) {
+			LOCAL_SWITCH_CSR(henvcfg);
+		}
+		if(csr_support & CSR_MENVCFG_SUPPORT) {
+			s_csrs->menvcfg = csr_read(CSR_MENVCFG);
+			csr_write(CSR_MENVCFG, d_csrs->menvcfg);
+		}
+
+		if(csr_support & CSR_HENVCFG_SUPPORT) {
+			csr_write(CSR_HENVCFG, 0);
+		}
+		if(csr_support & CSR_MENVCFG_SUPPORT) {
+			csr_write(CSR_MENVCFG, 0);
+		}
 
 		/* Save host S-mode CSRs (Keystone pattern).
 		 * M-mode trap handling may modify these; without save/restore
@@ -432,10 +444,19 @@ static inline void switch_from_csrs(struct sbi_trap_regs *regs,
 		s_csrs->vsatp	   = csr_read_set(CSR_VSATP, 0);
 
 		/* Restore host henvcfg/menvcfg */
-		s_csrs->henvcfg    = csr_read_set(CSR_HENVCFG, 0);
-		s_csrs->menvcfg    = csr_read_set(CSR_MENVCFG, 0);
-		csr_write(CSR_HENVCFG, d_csrs->henvcfg);
-		csr_write(CSR_MENVCFG, d_csrs->menvcfg);
+		if (csr_support & CSR_HENVCFG_SUPPORT) {
+			s_csrs->henvcfg    = csr_read_set(CSR_HENVCFG, 0);
+		}
+		if (csr_support & CSR_MENVCFG_SUPPORT) {
+			s_csrs->menvcfg    = csr_read_set(CSR_MENVCFG, 0);
+		}
+		
+		if(csr_support & CSR_HENVCFG_SUPPORT) {
+			csr_write(CSR_HENVCFG, d_csrs->henvcfg);
+		}
+		if(csr_support & CSR_MENVCFG_SUPPORT) {
+			csr_write(CSR_MENVCFG, d_csrs->menvcfg);
+		}
 
 		/* Save enclave S-mode CSRs, restore host S-mode CSRs
 		 * (Keystone pattern — prevents M-mode trap handling from

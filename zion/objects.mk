@@ -6,6 +6,7 @@ platform-genflags-y += -I$(src_dir)/zion/src
 platform-genflags-y += -I$(src_dir)/zion/src/keystone
 
 # PMP management (from keystone — hardware abstraction, not enclave logic)
+# The other files in keystone are not used, but we keep these code for now.
 zion-objs-y += src/keystone/pmp.o
 zion-objs-y += src/keystone/ipi.o
 zion-objs-y += src/mprv.o

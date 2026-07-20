@@ -69,6 +69,12 @@
 #define STOP_EDGE_CALL_HOST   1
 #define STOP_EXIT_ENCLAVE     2
 
+#define CSR_MENVCFG_SUPPORT 0b00001
+#define CSR_HENVCFG_SUPPORT 0b00010
+#define CSR_HEDELEG_SUPPORT 0b00100
+#define CSR_MEDELEG_SUPPORT 0b01000
+#define CSR_HSTATUS_SUPPORT 0b10000
+
 /* ---- Structs ---- */
 
 struct sbi_load_page {

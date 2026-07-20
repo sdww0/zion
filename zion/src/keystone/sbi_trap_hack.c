@@ -127,8 +127,9 @@ void sbi_trap_handler_keystone_enclave(struct sbi_trap_regs *regs)
 		   mcause, cause_str, regs->mepc, mtval);
 
 	if (regs->mepc == 0) {
+		extern unsigned long csr_support;
 		sbi_printf("[SM] FATAL: mepc=0, hanging. mcause=%lx mtval=%lx henvcfg=%lx hedeleg=%lx\n",
-			   mcause, mtval, csr_read(CSR_HENVCFG), csr_read(CSR_HEDELEG));
+			   mcause, mtval, csr_support & 0b00010 ? csr_read(CSR_HENVCFG) : 0, csr_read(CSR_HEDELEG));
 		while(1) { asm volatile("wfi"); }
 	}
 
