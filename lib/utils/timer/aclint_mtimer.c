@@ -85,6 +85,21 @@ static void mtimer_event_stop(void)
 	mt->time_wr(true, -1ULL, &time_cmp[target_hart - mt->first_hartid]);
 }
 
+static u64 mtimer_event_value(void)
+{
+	u32 target_hart = current_hartid();
+	struct sbi_scratch *scratch = sbi_scratch_thishart_ptr();
+	struct aclint_mtimer_data *mt;
+	u64 *time_cmp;
+
+	mt = mtimer_get_hart_data_ptr(scratch);
+	if (!mt)
+		return 0;
+
+	time_cmp = (void *)mt->mtimecmp_addr;
+	return mt->time_rd(&time_cmp[target_hart - mt->first_hartid]);
+}
+
 static void mtimer_event_start(u64 next_event)
 {
 	u32 target_hart = current_hartid();
@@ -106,7 +121,8 @@ static struct sbi_timer_device mtimer = {
 	.name = "aclint-mtimer",
 	.timer_value = mtimer_value,
 	.timer_event_start = mtimer_event_start,
-	.timer_event_stop = mtimer_event_stop
+	.timer_event_stop = mtimer_event_stop,
+	.timer_event_value = mtimer_event_value
 };
 
 void aclint_mtimer_sync(struct aclint_mtimer_data *mt)

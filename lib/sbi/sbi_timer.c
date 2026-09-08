@@ -151,6 +151,26 @@ void sbi_timer_event_start(u64 next_event)
 	csr_set(CSR_MIE, MIP_MTIP);
 }
 
+u64 sbi_timer_event_value(void)
+{
+	if (sbi_hart_has_extension(sbi_scratch_thishart_ptr(),
+				   SBI_HART_EXT_SSTC)) {
+#if __riscv_xlen == 32
+		u32 lo = csr_read(CSR_STIMECMP);
+		u32 hi = csr_read(CSR_STIMECMPH);
+
+		return ((u64)hi << 32) | lo;
+#else
+		return csr_read(CSR_STIMECMP);
+#endif
+	}
+
+	if (timer_dev && timer_dev->timer_event_value)
+		return timer_dev->timer_event_value();
+
+	return 0;
+}
+
 void sbi_timer_process(void)
 {
 	csr_clear(CSR_MIE, MIP_MTIP);

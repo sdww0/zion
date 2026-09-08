@@ -28,6 +28,9 @@ struct sbi_timer_device {
 
 	/** Stop timer event for current HART */
 	void (*timer_event_stop)(void);
+
+	/** Read current timer event compare value for current HART */
+	u64 (*timer_event_value)(void);
 };
 
 struct sbi_scratch;
@@ -83,6 +86,9 @@ void sbi_timer_set_delta_upper(ulong delta_upper);
 
 /** Start timer event for current HART */
 void sbi_timer_event_start(u64 next_event);
+
+/** Read current timer event compare value for current HART */
+u64 sbi_timer_event_value(void);
 
 /** Process timer event for current HART */
 void sbi_timer_process(void);
