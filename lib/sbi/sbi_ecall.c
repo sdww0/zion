@@ -116,9 +116,7 @@ int sbi_ecall_handler(struct sbi_trap_context *tcntx)
 	}
 
 	if (!out.skip_regs_update) {
-		if (ret < SBI_LAST_ERR ||
-		    (extension_id != SBI_EXT_0_1_CONSOLE_GETCHAR &&
-		     SBI_SUCCESS < ret)) {
+		if (ret < SBI_LAST_ERR) {
 			sbi_printf("%s: Invalid error %d for ext=0x%lx "
 				   "func=0x%lx\n", __func__, ret,
 				   extension_id, func_id);
