@@ -23,6 +23,7 @@ zion-objs-y += src/ed25519/fe.o
 zion-objs-y += src/ed25519/ge.o
 zion-objs-y += src/ed25519/keypair.o
 zion-objs-y += src/ed25519/sc.o
+zion-objs-y += src/ed25519/verify.o
 zion-objs-y += src/ed25519/sign.o
 zion-objs-y += src/hkdf_sha3_512/hkdf_sha3_512.o
 zion-objs-y += src/hmac_sha3/hmac_sha3.o
