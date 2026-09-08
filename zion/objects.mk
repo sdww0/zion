@@ -1,3 +1,8 @@
+ifneq ($(filter 1 y yes true,$(ZION_MEGREZ_MINIMAL_PREFLIGHT)),)
+platform-genflags-y += -DZION_MEGREZ_MINIMAL_PREFLIGHT
+zion-objs-y += src/megrez-preflight.o
+else
+
 zion-objs-y += src/tee-mem.o
 zion-objs-y += src/zion.o
 zion-objs-y += src/sm.o
@@ -21,3 +26,5 @@ zion-objs-y += src/ed25519/sc.o
 zion-objs-y += src/ed25519/sign.o
 zion-objs-y += src/hkdf_sha3_512/hkdf_sha3_512.o
 zion-objs-y += src/hmac_sha3/hmac_sha3.o
+
+endif
