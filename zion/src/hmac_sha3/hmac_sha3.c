@@ -49,6 +49,7 @@ static void prepare_key(const unsigned char *key, int key_len,
     }
 
     sbi_memset(new_key + key_len, 0x00, SHA3_512_BLOCK_LEN - key_len);
+    sbi_memset(&ctx, 0, sizeof(ctx));
 }
 
 /*
@@ -75,6 +76,7 @@ void hmac_sha3(const unsigned char *key, int key_len,
     hmac_sha3_init(&ctx, key, key_len);
     hmac_sha3_update(&ctx, text, text_len);
     hmac_sha3_final(&ctx, hmac);
+    sbi_memset(&ctx, 0, sizeof(ctx));
 }
 
 /*
@@ -102,6 +104,7 @@ void hmac_sha3_init(hmac_sha3_ctx_t *ctx,
 
     sha3_init(&(ctx->sha3_ctx), SHA3_512_HASH_LEN);
     sha3_update(&(ctx->sha3_ctx), temp_key, SHA3_512_BLOCK_LEN);
+    sbi_memset(temp_key, 0, sizeof(temp_key));
 }
 
 /*
@@ -150,4 +153,7 @@ void hmac_sha3_final(hmac_sha3_ctx_t *ctx, unsigned char *hash)
     sha3_update(&(ctx->sha3_ctx), temp_key, SHA3_512_BLOCK_LEN);
     sha3_update(&(ctx->sha3_ctx), inner_hash, SHA3_512_HASH_LEN);
     sha3_final(hash, &(ctx->sha3_ctx));
+    sbi_memset(temp_key, 0, sizeof(temp_key));
+    sbi_memset(inner_hash, 0, sizeof(inner_hash));
+    sbi_memset(ctx, 0, sizeof(*ctx));
 }

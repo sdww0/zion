@@ -56,14 +56,16 @@ int hkdf_sha3_512(const unsigned char *salt, int salt_len,
                   unsigned char *okm, int okm_len)
 {
     unsigned char prk[SHA3_512_HASH_LEN];
+    int ret;
 
     if (okm_len > 255 * SHA3_512_HASH_LEN) {
         return -1;
     }
 
     hkdf_extract(salt, salt_len, ikm, ikm_len, prk);
-
-    return hkdf_expand(prk, SHA3_512_HASH_LEN, info, info_len, okm, okm_len);
+    ret = hkdf_expand(prk, SHA3_512_HASH_LEN, info, info_len, okm, okm_len);
+    sbi_memset(prk, 0, sizeof(prk));
+    return ret;
 }
 
 /*
@@ -94,6 +96,7 @@ void hkdf_extract(const unsigned char *salt, int salt_len,
     }
 
     hmac_sha3(salt, salt_len, ikm, ikm_len, prk);
+    sbi_memset(nullsalt, 0, sizeof(nullsalt));
 }
 
 /*
@@ -124,22 +127,21 @@ int hkdf_expand(const unsigned char *prk, int prk_len,
     unsigned char t[SHA3_512_HASH_LEN];
     hmac_sha3_ctx_t ctx;
 
-    if (prk_len < SHA3_512_HASH_LEN) {
-        return -1;
-    }
-    if (okm_len > 255 * SHA3_512_HASH_LEN) {
-        return -1;
-    }
+    if (prk_len < SHA3_512_HASH_LEN ||
+        okm_len > 255 * SHA3_512_HASH_LEN)
+        goto invalid;
 
     // Compute T(1) - T(n) and copy resulting key to okm
-    for (unsigned char i = 1; i <= n; i++) {
+    for (int i = 1; i <= n; i++) {
+        unsigned char counter = i;
+
         hmac_sha3_init(&ctx, prk, prk_len);
 
         if (i > 1)
             hmac_sha3_update(&ctx, t, SHA3_512_HASH_LEN);
 
         hmac_sha3_update(&ctx, info, info_len);
-        hmac_sha3_update(&ctx, &i, 1);
+        hmac_sha3_update(&ctx, &counter, 1);
         hmac_sha3_final(&ctx, t);
 
         if (i < n)
@@ -149,5 +151,12 @@ int hkdf_expand(const unsigned char *prk, int prk_len,
                    okm_len - (i - 1) * SHA3_512_HASH_LEN);
     }
 
+    sbi_memset(t, 0, sizeof(t));
+    sbi_memset(&ctx, 0, sizeof(ctx));
     return 0;
+
+invalid:
+    sbi_memset(t, 0, sizeof(t));
+    sbi_memset(&ctx, 0, sizeof(ctx));
+    return -1;
 }
