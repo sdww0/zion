@@ -24,9 +24,9 @@ __trap_vector_tee:
 	TRAP_SAVE_INFO 0 1
 #endif
 
-    /* Call C routine */
+    /* Call C routine - dispatches to CVM or Enclave handler */
     add    a0, sp, zero
-    call    cvm_trap_handler
+    call    tee_dispatch_trap
 
 	TRAP_RESTORE_GENERAL_REGS_EXCEPT_A0_T0
 

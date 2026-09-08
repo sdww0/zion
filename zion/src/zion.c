@@ -1,180 +1,205 @@
-
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_ecall.h>
+#include <sbi/sbi_hart.h>
 #include <sbi/riscv_barrier.h>
 #include <sbi/riscv_asm.h>
+#include <sbi/riscv_encoding.h>
+#include "enclave.h"
+#include "tee.h"
+#include "tee-mem.h"
 #include "ree.h"
 #include "sm.h"
-#include "tee.h"
+#include "pmp.h"
+#include "platform-hook.h"
 
-extern struct sbi_ecall_extension ecall_cvm;
+#ifndef TARGET_PLATFORM_HEADER
+#error "Zion requires a target platform header"
+#endif
+#include TARGET_PLATFORM_HEADER
 
-static int zion_init_done = 0;
+enum zion_init_state {
+	ZION_INIT_PENDING = 0,
+	ZION_INIT_READY = 1,
+	ZION_INIT_DISABLED = -1,
+};
 
-#define ZION_ANSI_RESET  "\033[0m"
-#define ZION_ANSI_RED    "\033[1;31m"
-#define ZION_ANSI_YELLOW "\033[1;33m"
-#define ZION_ANSI_CYAN   "\033[1;36m"
-#define ZION_ANSI_GREEN  "\033[1;32m"
-#define ZION_ANSI_BLUE   "\033[1;34m"
-#define ZION_ANSI_WHITE  "\033[1;37m"
+static int zion_init_done = ZION_INIT_PENDING;
+static int sm_region_id = -1;
+static int os_region_id = -1;
+#ifdef ZION_MEGREZ_ACTIVATE
+static int sm_alias_region_id = -1;
+static int aclint_region_id = -1;
+static int high_addr_guard_region_id = -1;
+#endif
 
-static void zion_print_logo(void)
-{
-	sbi_printf("\n");
-	sbi_printf(ZION_ANSI_RED
-		   "#########"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_YELLOW
-		   "*********"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_CYAN
-		   " @@@@@@@ "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_GREEN
-		   "&&     &&"
-		   ZION_ANSI_RESET "\n");
-	sbi_printf(ZION_ANSI_RED
-		   "      ###"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_YELLOW
-		   "   ***   "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_CYAN
-		   "@@     @@"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_GREEN
-		   "&&&    &&"
-		   ZION_ANSI_RESET "\n");
-	sbi_printf(ZION_ANSI_RED
-		   "    ###  "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_YELLOW
-		   "   ***   "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_CYAN
-		   "@@     @@"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_GREEN
-		   "&& &&  &&"
-		   ZION_ANSI_RESET "\n");
-	sbi_printf(ZION_ANSI_RED
-		   "  ###    "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_YELLOW
-		   "   ***   "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_CYAN
-		   "@@     @@"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_GREEN
-		   "&&  && &&"
-		   ZION_ANSI_RESET "\n");
-	sbi_printf(ZION_ANSI_RED
-		   "#########"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_YELLOW
-		   "*********"
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_CYAN
-		   " @@@@@@@ "
-		   ZION_ANSI_RESET "   "
-		   ZION_ANSI_GREEN
-		   "&&    &&&"
-		   ZION_ANSI_RESET "\n");
-	sbi_printf("\n");
-}
-
-static void zion_print_banner(unsigned long hartid)
-{
-	sbi_printf(ZION_ANSI_BLUE
-		   " ============================================================\n"
-		   ZION_ANSI_RESET);
-	sbi_printf(ZION_ANSI_WHITE
-		   "   RISC-V TRUSTED EXECUTION ENVIRONMENT\n"
-		   ZION_ANSI_RESET);
-	sbi_printf(ZION_ANSI_BLUE
-		   " ============================================================\n"
-		   ZION_ANSI_RESET);
-	sbi_printf(" " ZION_ANSI_RED
-		   "> Monitor   "
-		   ZION_ANSI_RESET
-		   ": Zion security monitor on OpenSBI\n");
-	sbi_printf(" " ZION_ANSI_YELLOW
-		   "> Isolation "
-		   ZION_ANSI_RESET
-		   ": PMP-guarded protected memory across harts\n");
-	sbi_printf(" " ZION_ANSI_CYAN
-		   "> Memory    "
-		   ZION_ANSI_RESET
-		   ": CVM G-stage Sv48x4 with 2MB private blocks\n");
-	// sbi_printf(" " ZION_ANSI_GREEN
-	// 	   "> Measure   "
-	// 	   ZION_ANSI_RESET
-	// 	   ": SHA3-512 hashing and Ed25519 signing\n");
-	// sbi_printf(" " ZION_ANSI_RED
-	// 	   "> Capacity  "
-	// 	   ZION_ANSI_RESET
-	// 	   ": 16 CVMs | 4 vCPUs/CVM | 48 TEE threads\n");
-	sbi_printf(" " ZION_ANSI_GREEN
-		   "> SBI       "
-		   ZION_ANSI_RESET
-		   ": experimental extension 0x%08x\n",
-		   SBI_EXT_EXPERIMENTAL_zion);
-	sbi_printf(" " ZION_ANSI_CYAN
-		   "> Boot Hart "
-		   ZION_ANSI_RESET
-		   ": %lu | counters: cycle/time/instret\n",
-		   hartid);
-	sbi_printf(ZION_ANSI_BLUE
-		   " ============================================================\n"
-		   ZION_ANSI_RESET);
-	sbi_printf("\n");
-}
-
-void zion_enable_counters(void)
-{
-	csr_write(CSR_MCOUNTINHIBIT, 0);
-	csr_write(CSR_MCOUNTEREN, ZION_COUNTER_ENABLE_MASK);
-	csr_write(CSR_SCOUNTEREN, ZION_COUNTER_ENABLE_MASK);
-}
+/* Defined in tee-sbi-opensbi.c — unified CVM + Enclave handler */
+extern struct sbi_ecall_extension ecall_zion_tee;
 
 void zion_init(bool cold_boot)
 {
 	if (cold_boot) {
-		unsigned long hartid = csr_read(mhartid);
+#ifdef ZION_MEGREZ_ACTIVATE
+		uintptr_t alias = 0;
+#endif
+		tee_log("[SBI] Zion TEE initializing ... hart [%lx]\n",
+			   csr_read(mhartid));
 
-		/* only the cold-booting hart will execute these */
-		sbi_printf("[SBI] Initializing ... hart [%lx]\n",
-			   hartid);
-		zion_print_logo();
-		zion_print_banner(hartid);
+		/* Board builds validate H/PMP capabilities before registering an SBI
+		 * ABI or modifying PMP state. A failed bring-up probe disables Zion but
+		 * intentionally leaves the ordinary OpenSBI -> U-Boot/Linux path alive. */
+		if (platform_security_preflight() !=
+		    SBI_ERR_SM_ENCLAVE_SUCCESS) {
+			zion_init_done = ZION_INIT_DISABLED;
+			mb();
+			return;
+		}
+		if (platform_init_global_once() !=
+		    SBI_ERR_SM_ENCLAVE_SUCCESS) {
+			sm_error("[SM] Zion disabled: platform initialization failed\n");
+			zion_init_done = ZION_INIT_DISABLED;
+			mb();
+			return;
+		}
 
-		sbi_ecall_register_extension(&ecall_cvm);
+		/* Register unified TEE SBI extension (CVM + Enclave) */
+		sbi_ecall_register_extension(&ecall_zion_tee);
 
-		/*
-		 * Legacy SMM/OSM regions used Zion's own static PMP allocator.
-		 * The current flow leaves boot-time PMP ownership to OpenSBI and
-		 * installs the TVM private-memory window only after the host
-		 * reserves it through SBI_SM_RESERVE_MEM.
-		 */
-		sm_metadata_init();
+		/* Load attestation keys (platform-specific) */
+		sm_copy_key();
+
+		/* Initialize enclave metadata array */
+		enclave_init_metadata();
+
+		/* Initialize the host/CVM context graph as well.  Enclave-only
+		 * bring-up used tee_threads[hart] directly, but CVM SBI helpers
+		 * resolve their target through ree.harts[].current_state. */
 		ree_metadata_init();
 		tee_metadata_init();
 
-		zion_init_done = 1;
+		/* Reserve the highest-priority entry for the monitor and a
+		 * lowest-priority catch-all entry for normal S/U-mode memory.
+		 * Besides isolating the monitor, this ensures a later unaligned
+		 * CVM pool is represented by a two-entry TOR range instead of an
+		 * entry-zero TOR range starting at physical address zero. */
+		if (pmp_region_init_atomic(SMM_BASE, SMM_SIZE, PMP_PRI_TOP,
+					   &sm_region_id, 0) ||
+#ifdef ZION_MEGREZ_ACTIVATE
+		    !platform_security_alias(SMM_BASE, SMM_SIZE, &alias) ||
+		    pmp_region_init_atomic(alias, SMM_SIZE, PMP_PRI_ANY,
+					   &sm_alias_region_id, 0) ||
+		    pmp_region_init_atomic(0x02000000UL, 0x10000UL,
+					   PMP_PRI_ANY, &aclint_region_id, 0) ||
+		    /* Keep the vendor EIC7700X high-address guard.  The CPU's
+		     * hardware prefetcher can speculatively issue cache-line reads
+		     * into this unmapped aperture.  Without the guard those reads
+		     * reach the system NoC's default NPU error target and raise a
+		     * stream of mcput_snoc_mp -> snoc_npu decode interrupts.
+		     *
+		     * The range is deliberately represented as one two-entry TOR
+		     * region, matching the stock OpenSBI policy.  Entries 5 and 6
+		     * remain available for the fixed trusted pool and its system-port
+		     * alias after the baseline policy is installed. */
+		    pmp_region_init_atomic(0x1000000000UL, 0x7000000000UL,
+					   PMP_PRI_ANY, &high_addr_guard_region_id,
+					   0) ||
+#endif
+		    pmp_region_init_atomic(0, -1UL, PMP_PRI_BOTTOM,
+					   &os_region_id, 1)) {
+			sm_error("[SM] fatal: baseline memory protection initialization failed\n");
+			sbi_hart_hang();
+		}
 
+		zion_init_done = ZION_INIT_READY;
 		mb();
 	}
 
 	/* wait until cold-boot hart finishes */
-	while (!zion_init_done) {
+	while (!zion_init_done)
 		mb();
+	if (zion_init_done == ZION_INIT_DISABLED)
+		return;
+
+	/* OpenSBI installs its root-domain PMP table after final_init().  This
+	 * early application is needed on secondary-hart paths; the post-domain
+	 * hook calls the same routine again after OpenSBI's table is complete. */
+	zion_pmp_reconfigure();
+	platform_init_global();
+
+	/* Initialize host thread state for this hart.
+	 * tee_threads[hart_index] is the host thread. Its state.mode must be REE
+	 * so that switch_trap_deleg() uses REE delegation values (not CVM). */
+	unsigned int hart_index = zion_current_hart_index();
+	tee_threads[hart_index].state.mode = REE;
+
+	/* Disable sstc when menvcfg exists.  Priv v1.11/H v0.6 platforms do
+	 * not implement this CSR and continue to use their native timer path. */
+	platform_menvcfg_clear(ENVCFG_STCE);
+	if (cold_boot) {
+		if (platform_has_menvcfg())
+			tee_log("[SBI] sstc disabled on all harts\n");
+		else
+			tee_log("[SBI] menvcfg unavailable; sstc control skipped\n");
 	}
 
-	/* Per-hart counters are enabled after cold-boot metadata is ready. */
-	zion_enable_counters();
+	/* Enable counters (skip mcountinhibit — not supported by QEMU) */
+	csr_write(CSR_MCOUNTEREN, 0x7);
+	csr_write(CSR_SCOUNTEREN, 0x7);
 
 	if (cold_boot)
-		sbi_printf("[SBI] Zion security monitor initialized\n");
+		tee_log("[SBI] Zion TEE initialized\n");
+}
+
+void zion_pmp_reconfigure(void)
+{
+	int ret = 0;
+
+	if (zion_init_done != ZION_INIT_READY)
+		return;
+
+	pmp_init();
+	ret |= pmp_set_zion(sm_region_id, PMP_NO_PERM);
+#ifdef ZION_MEGREZ_ACTIVATE
+	ret |= pmp_set_zion(sm_alias_region_id, PMP_NO_PERM);
+	ret |= pmp_set_zion(aclint_region_id, PMP_NO_PERM);
+	ret |= pmp_set_zion(high_addr_guard_region_id, PMP_NO_PERM);
+#endif
+	ret |= pmp_set_zion(os_region_id, PMP_ALL_PERM);
+	/* A hart started after a secure-pool broadcast must receive all persistent
+	 * host-deny regions locally, including the Megrez system-port alias. */
+	if (tee_region_id >= 0) {
+		ret |= tee_mem_replay_local_pmp_permissions(PMP_NO_PERM);
+		if (tee_alias_region_id >= 0)
+			ret |= pmp_set_zion(tee_alias_region_id, PMP_NO_PERM);
+	}
+	pmp_dump_hart();
+	if (ret) {
+		sm_error("[SM] fatal: failed to install final Zion PMP policy on hart %u\n",
+			 current_hartid());
+		sbi_hart_hang();
+	}
+}
+
+void zion_pmp_finalize(void)
+{
+#ifdef ZION_MEGREZ_ACTIVATE
+	/* The EIC7700X prefetch path can issue transactions with M-mode access
+	 * attributes, so an unlocked S/U deny entry is insufficient.  Add PMP_L
+	 * only after OpenSBI has installed its root-domain table; locking earlier
+	 * would prevent that table from being replaced by Zion's final layout. */
+	if (zion_init_done != ZION_INIT_READY)
+		return;
+	if (pmp_lock_zion(high_addr_guard_region_id, PMP_NO_PERM)) {
+		sm_error("[SM] fatal: failed to lock the Megrez high-address guard on hart %u\n",
+			 current_hartid());
+		sbi_hart_hang();
+	}
+	pmp_dump_hart();
+#endif
+}
+
+void zion_enable_counters(void)
+{
+	/* mcountinhibit CSR (0x320) is optional and not supported by QEMU */
+	csr_write(CSR_MCOUNTEREN, 0x7);
+	csr_write(CSR_SCOUNTEREN, 0x7);
 }

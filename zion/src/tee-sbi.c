@@ -16,7 +16,7 @@ unsigned long sbi_sm_reserve_mem(struct sbi_trap_regs *regs, unsigned long type,
 
 	type = reserve_mem(base, count);
 	if (type)
-		sbi_printf("[SBI] sbi_sm_reserve_mem() failed: ret=0x%lx, base=0x%lx, count=0x%lx\n",
+		tee_log("[SBI] sbi_sm_reserve_mem() failed: ret=0x%lx, base=0x%lx, count=0x%lx\n",
 			   type, base, count);
 	return type;
 }
@@ -31,7 +31,7 @@ unsigned long sbi_sm_create_cvm(struct sbi_trap_regs *regs,
 	if (!ret)
 		out->value = tid;
 	else
-		sbi_printf("[SBI] sbi_sm_create_cvm() failed: ret=0x%lx\n",
+		tee_log("[SBI] sbi_sm_create_cvm() failed: ret=0x%lx\n",
 			   ret);
 	return ret;
 }
@@ -47,7 +47,7 @@ unsigned long sbi_sm_init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 	if (!ret)
 		out->value = ttid;
 	else
-		sbi_printf("[SBI] sbi_sm_init_cvm_vcpu() failed: tid=%x, ret=%lx\n",
+		tee_log("[SBI] sbi_sm_init_cvm_vcpu() failed: tid=%x, ret=%lx\n",
 			   tid, ret);
 	return ret;
 }
@@ -59,16 +59,13 @@ unsigned long sbi_sm_enter_cvm(struct sbi_trap_regs *regs, unsigned int tid,
 }
 
 /* Exit paths must distinguish between explicit SBI exits and interrupts. */
-unsigned long sbi_sm_exit_cvm(struct sbi_trap_regs *regs, unsigned int tid,
+unsigned long sbi_sm_exit_cvm(struct sbi_trap_regs *regs, unsigned int rtid,
 			      unsigned int ttid, tee_quit_cause exit_cause,
 			      struct sbi_trap_info *trap,
 			      struct cvm_extra_trap_info *extra_trap
 				)
 {
-	zion_printf(
-		"[SBI] sbi_sm_exit_cvm(): tid=0x%x, ttid=0x%x, exit_cause=0x%x\n",
-		tid, ttid, exit_cause);
-	regs->a0 = exit_cvm(regs, tid, ttid, exit_cause, trap, extra_trap);
+	regs->a0 = exit_cvm(regs, rtid, ttid, exit_cause, trap, extra_trap);
 	// Skip ecall in host
 	regs->mepc += 4;
 	return regs->a0;
@@ -93,9 +90,7 @@ unsigned long sbi_sm_set_cvm_mem_info(struct sbi_trap_regs *regs,
 	if (region_overlap)
 		return -1;
 
-	set_cvm_mem_info(tid, &mem_info);
-
-	return 0;
+	return set_cvm_mem_info(tid, &mem_info);
 }
 
 unsigned long sbi_sm_load_mem(struct sbi_trap_regs *regs, unsigned int tid,
@@ -112,7 +107,7 @@ unsigned long sbi_sm_load_mem(struct sbi_trap_regs *regs, unsigned int tid,
 	}
 
 	d_rtid = hart_get_callee_rtid(tid);
-	sbi_printf(
+	tee_log(
 		"[SBI] sbi_sm_load_mem() info: tid=%u, d_rtid=%u, stash=0x%lx, pos=0x%lx, size=0x%lx\n",
 		tid, d_rtid, p.stash, p.pos, p.size);
 
@@ -153,7 +148,7 @@ unsigned long sbi_sm_register_shared_mem_with_ree(struct sbi_trap_regs *regs,
 	if (copy_to_sm(&mark_mem, create_arg, sizeof(struct sbi_mark_mem)))
 		return -1;
 
-	sbi_printf(
+	tee_log(
 		"[SBI] SBI_SM_REGISTER_SHARED_MEM_WITH_REE!!! addr=%lx, num=%lx\n",
 		mark_mem.addr, mark_mem.num);
 
@@ -173,14 +168,16 @@ unsigned long sbi_sm_cycle_begin()
 {
 	zion_enable_counters();
 
+#ifdef ZION_DEBUG
 	unsigned long csr_mcounter	= csr_read(CSR_MCOUNTEREN);
 	unsigned long csr_scounter	= csr_read(CSR_SCOUNTEREN);
 	unsigned long csr_mcountinhibit = csr_read(CSR_MCOUNTINHIBIT);
 
-	sbi_printf(
+	tee_log(
 		"[SM] hartid=%u, mcounter=%lx, scounter=%lx, mcountinhibit=%lx\n",
 		current_hartid(), csr_mcounter, csr_scounter,
 		csr_mcountinhibit);
+#endif
 
 	for (size_t i = 0; i < TEE_TRAP_STAT_SLOTS; i++) {
 
@@ -193,15 +190,17 @@ unsigned long sbi_sm_cycle_begin()
 
 unsigned long sbi_sm_cycle_end()
 {
+#ifdef ZION_DEBUG
 	for (size_t i = 0; i < TEE_TRAP_STAT_SLOTS; i++) {
 		unsigned long avg =
 			tee_trap_records[i] ?
 				tee_trap_cycles[i] / tee_trap_records[i] :
 				0;
-		sbi_printf(
+		tee_log(
 			"[SM] tee_trap_records[%lu]=%lu, cycles=%lu, AVG=%lu\n",
 			i, tee_trap_records[i], tee_trap_cycles[i], avg);
 	}
+#endif
 
 	return 0;
 }

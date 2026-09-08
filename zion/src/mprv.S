@@ -48,33 +48,6 @@
     csrc mstatus, reg
 
 
-#define TVM_TRY(tryname, r_mtvec, r_mepc, r_mcause, r_mstatus, r_vsatp) \
-    la r_mtvec, tryname##_err     ;\
-    csrrw r_mtvec, mtvec, r_mtvec ;\
-    csrr r_mepc, mepc             ;\
-    csrr r_mcause, mcause         ;\
-    csrr r_mstatus, mstatus       ;\
-    csrr r_vsatp, vsatp
-
-#define TVM_CATCH_ERR(tryname, r_mepc) \
-        j tryname##_ok    ;\
-        .align 4          ;\
-    tryname##_err :       ;\
-        la r_mepc, tryname##_err_real ;\
-        csrw mepc, r_mepc ;\
-        mret              ;\
-        .align 4          ;\
-    tryname##_err_real :
-
-#define TVM_TRY_END(tryname, r_mtvec, r_mepc, r_mcause, r_mstatus, r_vsatp) \
-    tryname##_ok :             ;\
-        csrw mtvec, r_mtvec    ;\
-        csrw mepc, r_mepc      ;\
-        csrw mcause, r_mcause  ;\
-        csrw mstatus, r_mstatus ;\
-        csrw vsatp, r_vsatp
-
-
 
 .global copy_block_to_sm
 copy_block_to_sm:
@@ -130,7 +103,6 @@ TRY_END(copy_word_in_check, t1, t2, t3, t4)
 
     UNSET_MPRV(t5)
     ret
-
 
 .global copy1_to_sm
 copy1_to_sm:

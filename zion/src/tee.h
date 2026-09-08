@@ -8,7 +8,7 @@
 
 #define SBI_EXT_EXPERIMENTAL_zion 0x08424b45
 
-// common
+/* ---- Common SBI funcids ---- */
 #define SBI_SM_RESERVE_MEM 1014
 #define SBI_SM_LOAD_PAGE 1020
 #define SBI_SM_REGISTER_PT 1021
@@ -18,8 +18,11 @@
 #define SBI_SM_CYCLE_BEGIN 1027
 #define SBI_SM_CYCLE_END 1028
 #define SBI_SM_CLEAN_SEC_MEM 1029
+#define SBI_SM_EXTEND_MEM 1035
+#define SBI_SM_REMOVE_MEM_EXTENT 1036
+#define SBI_SM_QUERY_MEM_EXTENT 1037
 
-// ree
+/* ---- CVM (Confidential VM) SBI funcids ---- */
 #define SBI_SM_SET_CVM_MEM_INFO 1018
 #define SBI_SM_CREATE_CVM 1015
 #define SBI_SM_INIT_CVM_VCPU 1012
@@ -27,16 +30,50 @@
 #define SBI_SM_EXIT_CVM 1022
 #define SBI_SM_DESTROY_CVM 1023
 
-// tee
+/* ---- TEE shared memory SBI funcids ---- */
 #define SBI_SM_REGISTER_SHARED_MEM_WITH_REE 1030
 #define SBI_SM_FREE_SHARED_MEM_WITH_REE 1031
 #define SBI_SM_SHARE_MEM_TO 1032
 #define SBI_SM_SHARE_MEM_FROM 1033
 
-#define FID_RANGE_HOST 2999
-#define SBI_SM_RANDOM 3001
+/*
+ * ---- Zion Enclave SBI funcids ----
+ *
+ * These are the standard Zion function IDs (from sm_call.h).
+ * Range 2000-2999: called by host (S-mode)
+ * Range 3000-3999: called by enclave (S-mode)
+ */
+#define SBI_SM_CREATE_ENCLAVE    2001
+#define SBI_SM_DESTROY_ENCLAVE   2002
+#define SBI_SM_RUN_ENCLAVE       2003
+#define SBI_SM_RESUME_ENCLAVE    2005
+#define FID_RANGE_HOST           2999
 
-#define SBI_SM_GET_SEALING_KEY 3003
+#define SBI_SM_RANDOM            3001
+#define SBI_SM_ATTEST_ENCLAVE    3002
+#define SBI_SM_GET_SEALING_KEY   3003
+#define SBI_SM_STOP_ENCLAVE      3004
+#define SBI_SM_EXIT_ENCLAVE      3006
+#define SBI_SM_GET_SEALING_KEY_V1 3007
+#define FID_RANGE_ENCLAVE        3999
+
+/*
+ * ---- Old Zion enclave funcids (renamed to avoid conflict) ----
+ * These were the original Zion enclave funcids before Zion port.
+ * They are kept for reference but no longer used in the dispatch.
+ */
+#define SBI_SM_ZION_EXIT_ENCLAVE_OLD   2004
+#define SBI_SM_ZION_COPY_FROM_ENCLAVE  2005  /* conflicts with RESUME */
+#define SBI_SM_ZION_COPY_TO_ENCLAVE    2006
+#define SBI_SM_ZION_MEMORY_RECLAIM     2007
+#define SBI_SM_ZION_SET_ENCLAVE_ENTRY  2008
+
+/* Zion stop reasons */
+#define STOP_TIMER_INTERRUPT  0
+#define STOP_EDGE_CALL_HOST   1
+#define STOP_EXIT_ENCLAVE     2
+
+/* ---- Structs ---- */
 
 struct sbi_load_page {
 	unsigned long stash;
@@ -133,12 +170,39 @@ struct tee_csr {
 	uintptr_t vstval;
 	uintptr_t hvip;
 	uintptr_t vsatp;
+	uintptr_t henvcfg;
+	uintptr_t menvcfg;
+	/* Physical timer compare saved while a bounded CVM or nested-enclave
+	 * execution slice temporarily owns the hart timer. */
+	u64 timer_event;
+
+	/* S-mode CSRs (HS-mode in H extension context).
+	 * Zion saves/restores these to prevent SM's M-mode trap
+	 * handling from corrupting the host's S-mode state. */
+	uintptr_t sstatus;
+	uintptr_t sie;
+	uintptr_t stvec;
+	uintptr_t sscratch;
+	uintptr_t sepc;
+	uintptr_t scause;
+	uintptr_t stval;
+	uintptr_t sip;
+	uintptr_t satp;
+};
+
+/* Complete RV64D architectural floating-point state.  Each runnable context
+ * owns one instance so physical FP registers never cross REE/CVM/enclave
+ * boundaries and survive stop/resume transitions. */
+struct tee_fp_state {
+	uint64_t regs[32];
+	uintptr_t fcsr;
 };
 
 struct tee_thread {
 	void *master;
 	struct tee_gpr gprs;
 	struct tee_csr csrs;
+	struct tee_fp_state fp_state;
 	struct zion_state state;
 	struct zion_state *prev_state;
 };
@@ -150,6 +214,8 @@ struct tee {
 
 extern struct tee_thread tee_threads[MAX_TEE_THREADS];
 extern unsigned int tee_thread_next;
+extern int tee_region_id;
+extern int tee_alias_region_id;
 
 struct cvm_extra_trap_info;
 struct kvm_vcpu_channel;
@@ -157,6 +223,10 @@ struct kvm_vcpu_channel;
 struct tee_thread *tee_thread_alloc(void);
 void tee_thread_free(struct tee_thread *tthread);
 unsigned long reserve_mem(unsigned long base, unsigned long count);
+unsigned long extend_mem(unsigned long base, unsigned long count,
+			 unsigned long *extent_id);
+unsigned long remove_mem_extent(unsigned long extent_id);
+unsigned long query_mem_extent(unsigned long extent_id, uintptr_t info_ptr);
 unsigned long register_pt(unsigned int tid, struct sbi_register_pt *pt);
 unsigned long sync_pt(unsigned int tid, unsigned long gpa,
 		      unsigned long pt_paddr);
@@ -165,6 +235,7 @@ void set_inited(unsigned int tid);
 int teem_init(uintptr_t start, unsigned long size);
 void tee_metadata_init(void);
 
+/* CVM SBI wrappers */
 unsigned long sbi_sm_reserve_mem(struct sbi_trap_regs *regs, unsigned long type,
 				 uintptr_t base, unsigned long count);
 unsigned long sbi_sm_create_cvm(struct sbi_trap_regs *regs,
@@ -174,7 +245,7 @@ unsigned long sbi_sm_init_cvm_vcpu(struct sbi_trap_regs *regs, unsigned int tid,
 				   struct kvm_vcpu_channel *shared_mem_ptr);
 unsigned long sbi_sm_enter_cvm(struct sbi_trap_regs *regs, unsigned int tid,
 			       unsigned int ttid);
-unsigned long sbi_sm_exit_cvm(struct sbi_trap_regs *regs, unsigned int tid,
+unsigned long sbi_sm_exit_cvm(struct sbi_trap_regs *regs, unsigned int rtid,
 			      unsigned int ttid, tee_quit_cause exit_cause,
 			      struct sbi_trap_info *trap,
 			      struct cvm_extra_trap_info *extra_trap);

@@ -1,5 +1,8 @@
 #include <sbi/sbi_types.h>
 #include <sbi/riscv_asm.h>
+#include <sbi/sbi_console.h>
+#include <sbi/sbi_hart.h>
+#include <sbi/sbi_scratch.h>
 #include "ree.h"
 #include "zion.h"
 #include "cvm.h"
@@ -7,30 +10,49 @@
 
 struct ree ree;
 
+unsigned int zion_current_hart_index(void)
+{
+	u32 hartid = current_hartid();
+	u32 hart_index = sbi_hartid_to_hartindex(hartid);
+
+	if (!sbi_hartindex_valid(hart_index) || hart_index >= MAX_REE_HARTS) {
+		tee_log("[SM] unsupported hart: id=%u index=%u max=%u\n",
+			 hartid, hart_index, MAX_REE_HARTS);
+		sm_error("[SM] fatal: unsupported hart topology\n");
+		sbi_hart_hang();
+	}
+
+	return hart_index;
+}
+
 struct zion_state *hart_get_caller()
 {
-	return ree.harts[csr_read(mhartid)].current_state;
+	return ree.harts[zion_current_hart_index()].current_state;
 }
 
 unsigned int hart_get_caller_rtid()
 {
-	return ree.harts[csr_read(mhartid)].current_state->rtid;
+	return ree.harts[zion_current_hart_index()].current_state->rtid;
 }
 
 unsigned int hart_get_caller_ttid()
 {
-	return ree.harts[csr_read(mhartid)].current_state->ttid;
+	return ree.harts[zion_current_hart_index()].current_state->ttid;
 }
 
 unsigned int hart_get_callee_rtid(unsigned int tid)
 {
-	unsigned int rtid;
+	unsigned int rtid = (unsigned int)-1;
 
 	zion_mode mode = hart_get_mode();
 	if (mode == REE) {
+		if (tid >= MAX_TEES)
+			return rtid;
 		rtid = ree.tees[tid].id;
 	} else if (mode == CVM) {
 		unsigned int caller_rtid = hart_get_caller_rtid();
+		if (caller_rtid >= MAX_CVMS || tid >= MAX_TEES)
+			return rtid;
 		rtid			 = cvms[caller_rtid].tees[tid].id;
 	} else if (mode == ENCLAVE) {
 		return tid;
@@ -40,22 +62,22 @@ unsigned int hart_get_callee_rtid(unsigned int tid)
 
 zion_mode hart_get_mode()
 {
-	return ree.harts[csr_read(mhartid)].current_state->mode;
+	return ree.harts[zion_current_hart_index()].current_state->mode;
 }
 
 void hart_enter_context(struct tee_thread *d_tthread)
 {
-	unsigned long mhartid = csr_read(mhartid);
-	d_tthread->prev_state		 = ree.harts[mhartid].current_state;
-	ree.harts[mhartid].current_state = &d_tthread->state;
+	unsigned int hart_index = zion_current_hart_index();
+	d_tthread->prev_state = ree.harts[hart_index].current_state;
+	ree.harts[hart_index].current_state = &d_tthread->state;
 }
 
 void hart_exit_context(struct tee_thread *s_tthread)
 {
-	unsigned long mhartid = csr_read(mhartid);
+	unsigned int hart_index = zion_current_hart_index();
 
-	ree.harts[mhartid].current_state = s_tthread->prev_state;
-	s_tthread->prev_state		 = NULL;
+	ree.harts[hart_index].current_state = s_tthread->prev_state;
+	s_tthread->prev_state = NULL;
 }
 
 void save_tthread_state(struct zion_state *state, unsigned int rtid,
