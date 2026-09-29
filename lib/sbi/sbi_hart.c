@@ -561,6 +561,16 @@ int sbi_hart_pmp_configure(struct sbi_scratch *scratch)
 		rc = sbi_hart_oldpmp_configure(scratch, pmp_count,
 						pmp_log2gran, pmp_addr_max);
 
+#ifdef ZION_DYNAMIC_PMP
+	/* The EIC7700X root-domain table is the board's baseline policy.  Replay
+	 * Zion's runtime CVM-pool deny only after OpenSBI has rebuilt that table. */
+	if (!rc) {
+		extern void zion_pmp_reconfigure(void);
+
+		zion_pmp_reconfigure();
+	}
+#endif
+
 	/*
 	 * As per section 3.7.2 of privileged specification v1.12,
 	 * virtual address translations can be speculatively performed

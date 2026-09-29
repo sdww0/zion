@@ -1,5 +1,6 @@
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_locks.h>
+#include <sbi/sbi_console.h>
 #include <sbi/sbi_hart.h>
 
 #include "ipi.h"
@@ -378,6 +379,8 @@ int pmp_unset(region_id region)
 
 int pmp_set_global(region_id region, uint8_t perm)
 {
+	int ret;
+
 	if (!region_valid(region)) {
 		sbi_printf("[SM] pmp_set_global() failed: invalid region=%d\n",
 			   region);
@@ -388,20 +391,29 @@ int pmp_set_global(region_id region, uint8_t perm)
 	 * PMP CSRs are per-hart. The boot hart updates itself through the same
 	 * TLB/IPI path so the protected window becomes consistent on all harts.
 	 */
-	send_and_sync_pmp_ipi(region, SBI_PMP_IPI_TYPE_SET, perm);
-	return 0;
+	ret = send_and_sync_pmp_ipi(region, SBI_PMP_IPI_TYPE_SET, perm);
+	if (ret)
+		return ret;
+
+	return pmp_set_zion(region, perm);
 }
 
 int pmp_unset_global(region_id region)
 {
+	int ret;
+
 	if (!region_valid(region)) {
 		sbi_printf("[SM] pmp_unset_global() failed: invalid region=%d\n",
 			   region);
 		return -1;
 	}
 
-	send_and_sync_pmp_ipi(region, SBI_PMP_IPI_TYPE_UNSET, PMP_NO_PERM);
-	return 0;
+	ret = send_and_sync_pmp_ipi(region, SBI_PMP_IPI_TYPE_UNSET,
+				    PMP_NO_PERM);
+	if (ret)
+		return ret;
+
+	return pmp_unset(region);
 }
 
 int pmp_detect_region_overlap_atomic(uintptr_t base, uintptr_t size)

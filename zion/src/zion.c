@@ -24,8 +24,10 @@ enum zion_init_state {
 };
 
 static int zion_init_done = ZION_INIT_PENDING;
+#ifndef ZION_DYNAMIC_PMP
 static int sm_region_id = -1;
 static int os_region_id = -1;
+#endif
 #ifdef ZION_MEGREZ_ACTIVATE
 static int sm_alias_region_id = -1;
 static int aclint_region_id = -1;
@@ -81,6 +83,7 @@ void zion_init(bool cold_boot)
 		 * Besides isolating the monitor, this ensures a later unaligned
 		 * CVM pool is represented by a two-entry TOR range instead of an
 		 * entry-zero TOR range starting at physical address zero. */
+#ifndef ZION_DYNAMIC_PMP
 		if (pmp_region_init_atomic(SMM_BASE, SMM_SIZE, PMP_PRI_TOP,
 					   &sm_region_id, 0) ||
 #ifdef ZION_MEGREZ_ACTIVATE
@@ -108,6 +111,7 @@ void zion_init(bool cold_boot)
 			sm_error("[SM] fatal: baseline memory protection initialization failed\n");
 			sbi_hart_hang();
 		}
+#endif
 
 		zion_init_done = ZION_INIT_READY;
 		mb();
@@ -156,6 +160,12 @@ void zion_pmp_reconfigure(void)
 	if (zion_init_done != ZION_INIT_READY)
 		return;
 
+#ifdef ZION_DYNAMIC_PMP
+	/* OpenSBI owns the board PMP layout.  A late-starting or resumed hart
+	 * only needs the persistent CVM-pool deny replayed after that layout. */
+	if (tee_region_id >= 0)
+		ret = pmp_set_zion(tee_region_id, PMP_NO_PERM);
+#else
 	pmp_init();
 	ret |= pmp_set_zion(sm_region_id, PMP_NO_PERM);
 #ifdef ZION_MEGREZ_ACTIVATE
@@ -172,6 +182,7 @@ void zion_pmp_reconfigure(void)
 			ret |= pmp_set_zion(tee_alias_region_id, PMP_NO_PERM);
 	}
 	pmp_dump_hart();
+#endif
 	if (ret) {
 		sm_error("[SM] fatal: failed to install final Zion PMP policy on hart %u\n",
 			 current_hartid());

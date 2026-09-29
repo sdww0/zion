@@ -29,6 +29,14 @@ ifneq ($(filter 1 y yes true,$(ZION_MEGREZ_ACTIVATE)),)
 platform-genflags-y += -DZION_MEGREZ_ACTIVATE
 endif
 
+# EIC7700X has only eight PMP entries and its OpenSBI platform code already
+# consumes entries for board-specific root-domain ranges.  Keep that hardware
+# layout and insert the CVM pool dynamically instead of replacing every entry
+# with the enclave allocator's fixed layout.
+ifneq ($(filter 1 y yes true,$(ZION_DYNAMIC_PMP)),)
+platform-genflags-y += -DZION_DYNAMIC_PMP
+endif
+
 # Environment-configuration CSRs were added after Priv v1.11/H v0.6.  Keep
 # them enabled for existing platforms, but compile every access out of Megrez
 # probe builds unless the caller explicitly opts in with ZION_USE_ENVCFG=1.
@@ -55,7 +63,11 @@ zion-objs-y += src/megrez-preflight.o
 else
 
 # PMP management (from zion — hardware abstraction, not enclave logic)
+ifneq ($(filter 1 y yes true,$(ZION_DYNAMIC_PMP)),)
+zion-objs-y += src/pmp.o
+else
 zion-objs-y += src/zion-enclave/pmp.o
+endif
 zion-objs-y += src/zion-enclave/ipi.o
 zion-objs-y += src/mprv.o
 
