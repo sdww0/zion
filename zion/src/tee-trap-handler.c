@@ -86,7 +86,12 @@ static void sbi_trap_error(const char *msg, int rc, ulong mcause, ulong mtval,
 		   regs->t6);
 #endif
 
-	sm_error("[SM] fatal: unhandled monitor trap\n");
+	sm_error("[SM] fatal: unhandled monitor trap: hart=%u rc=%d "
+		 "reason=%s mcause=0x%" PRILX " mepc=0x%" PRILX
+		 " mtval=0x%" PRILX " mtval2=0x%" PRILX
+		 " mtinst=0x%" PRILX " mstatus=0x%" PRILX "\n",
+		 current_hartid(), rc, msg ? msg : "unknown", mcause,
+		 regs->mepc, mtval, mtval2, mtinst, regs->mstatus);
 	sbi_hart_hang();
 }
 
@@ -430,11 +435,10 @@ static int handle_guest_page_fault(struct sbi_trap_regs *regs,
 	if (fault_addr >= cvm_mem_info->guest_phys_addr &&
 	    fault_addr < cvm_mem_info->guest_phys_addr +
 				 cvm_mem_info->memory_size) {
-		uint64_t block_gpa = fault_addr & ~(BLOCK_SIZE - 1);
 		uint64_t block_hpa;
 		bool created;
 
-		if (cvm_resolve_private_block(rtid, block_gpa, &block_hpa,
+		if (cvm_resolve_private_block(rtid, fault_addr, &block_hpa,
 					      &created)) {
 			tee_log(
 				"[SBI] cvm_trap_handler(): Failed to map 2MB block\n");
@@ -449,7 +453,7 @@ static int handle_guest_page_fault(struct sbi_trap_regs *regs,
 		if (created)
 			zion_printf(
 				"[SBI] guest-pf: mapped gpa=0x%lx to hpa=0x%lx\n",
-				block_gpa, block_hpa);
+				fault_addr & ~(BLOCK_SIZE - 1), block_hpa);
 
 		return 0;
 	}

@@ -593,6 +593,88 @@ bool cvm_hpa_range_is_mapped(uint64_t hpa, size_t size)
 	return false;
 }
 
+static int resolve_split_private_block(unsigned int rtid, uint64_t fault_gpa,
+				       uint64_t block_gpa, pte_t l1_pte,
+				       uint64_t *block_hpa,
+				       bool *created)
+{
+	pte_t *child_pt;
+	uint64_t private_hpa = 0;
+	uint32_t owner = DATA_BLOCK_CVM_OWNER(rtid);
+	bool allocated = false;
+
+	child_pt = (pte_t *)(((l1_pte & ZION_PTE_ADDR_MASK) >>
+			      ZION_PTE_PPN_SHIFT) << PAGE_SHIFT);
+	if (pte_is_leaf(l1_pte) ||
+	    !cvm_pt_page_is_private(rtid, (uint64_t)child_pt))
+		return -1;
+
+	for (size_t i = 0; i <= ZION_PTE_INDEX_MASK; i++) {
+		pte_t entry = child_pt[i];
+		uint64_t page_hpa;
+		uint64_t candidate;
+		size_t owner_contiguous;
+
+		if (!(entry & PTE_V))
+			continue;
+		if (!pte_is_leaf(entry))
+			return -1;
+
+		page_hpa = ((entry & ZION_PTE_ADDR_MASK) >>
+			    ZION_PTE_PPN_SHIFT) << PAGE_SHIFT;
+		if (!data_block_owned_range(&g_mem_pool.data_pool, page_hpa,
+					    owner, &owner_contiguous))
+			continue;
+		if (page_hpa < i * PAGE_SIZE)
+			return -1;
+		candidate = page_hpa - i * PAGE_SIZE;
+		if ((candidate & (BLOCK_SIZE - 1)) ||
+		    !data_block_owned_range(&g_mem_pool.data_pool, candidate,
+					    owner, &owner_contiguous) ||
+		    owner_contiguous < BLOCK_SIZE ||
+		    (private_hpa && private_hpa != candidate))
+			return -1;
+		private_hpa = candidate;
+	}
+
+	/* A valid non-private leaf at the faulting offset is not a demand-paging
+	 * hole. Do not replace an existing shared mapping on its behalf. */
+	if (child_pt[(fault_gpa >> PAGE_SHIFT) & ZION_PTE_INDEX_MASK] & PTE_V)
+		return -1;
+
+	if (!private_hpa) {
+		private_hpa = alloc_data_block(&g_mem_pool.data_pool, owner);
+		if (private_hpa == (uint64_t)-1)
+			return -1;
+		allocated = true;
+	}
+
+	for (size_t first = 0; first <= ZION_PTE_INDEX_MASK;) {
+		size_t end;
+
+		if (child_pt[first] & PTE_V) {
+			first++;
+			continue;
+		}
+		for (end = first + 1; end <= ZION_PTE_INDEX_MASK; end++) {
+			if (child_pt[end] & PTE_V)
+				break;
+		}
+		if (map_gpa_to_hpa(&g_mem_pool, rtid,
+				    block_gpa + first * PAGE_SIZE,
+				    private_hpa + first * PAGE_SIZE,
+				    (end - first) * PAGE_SIZE, 0,
+				    PTE_R | PTE_W | PTE_X))
+			return -1;
+		first = end;
+	}
+
+	*block_hpa = private_hpa;
+	if (created)
+		*created = allocated;
+	return 0;
+}
+
 int cvm_resolve_private_block(unsigned int rtid, uint64_t gpa,
 			      uint64_t *block_hpa, bool *created)
 {
@@ -609,6 +691,8 @@ int cvm_resolve_private_block(unsigned int rtid, uint64_t gpa,
 	spin_lock(&cvm_map_locks[rtid]);
 	root_pt = (pte_t *)get_cvm_root_pt(&g_mem_pool, rtid);
 	if (!root_pt) {
+		sm_error("[SM] private block failed: rtid=%u gpa=0x%lx "
+			"reason=no-root\n", rtid, block_gpa);
 		spin_unlock(&cvm_map_locks[rtid]);
 		return -1;
 	}
@@ -616,15 +700,36 @@ int cvm_resolve_private_block(unsigned int rtid, uint64_t gpa,
 			    get_cvm_pt_mode(&g_mem_pool, rtid));
 	if (pte && (*pte & PTE_V)) {
 		size_t owner_contiguous;
+		int split_ret;
+
+		if (!pte_is_leaf(*pte)) {
+			split_ret = resolve_split_private_block(rtid, gpa,
+							block_gpa, *pte, block_hpa,
+							created);
+			if (split_ret)
+				sm_error("[SM] private split block failed: rtid=%u "
+					 "gpa=0x%lx mode=%u pte=0x%lx\n",
+					 rtid, block_gpa,
+					 get_cvm_pt_mode(&g_mem_pool, rtid), *pte);
+			spin_unlock(&cvm_map_locks[rtid]);
+			if (split_ret)
+				return split_ret;
+			return cvm_hfence_active_harts(rtid, block_gpa,
+						       BLOCK_SIZE);
+		}
 
 		hpa = ((*pte & ZION_PTE_ADDR_MASK) >>
 		       ZION_PTE_PPN_SHIFT) << PAGE_SHIFT;
-		if (!pte_is_leaf(*pte) || !(*pte & PTE_W) ||
+		if (!(*pte & PTE_W) ||
 		    (hpa & (BLOCK_SIZE - 1)) ||
 		    !data_block_owned_range(&g_mem_pool.data_pool, hpa,
 					    DATA_BLOCK_CVM_OWNER(rtid),
 					    &owner_contiguous) ||
 		    owner_contiguous < BLOCK_SIZE) {
+			sm_error("[SM] private block conflict: rtid=%u gpa=0x%lx "
+				"mode=%u pte=0x%lx hpa=0x%lx\n",
+				rtid, block_gpa,
+				get_cvm_pt_mode(&g_mem_pool, rtid), *pte, hpa);
 			spin_unlock(&cvm_map_locks[rtid]);
 			return -1;
 		}
@@ -637,9 +742,20 @@ int cvm_resolve_private_block(unsigned int rtid, uint64_t gpa,
 
 	hpa = alloc_data_block(&g_mem_pool.data_pool,
 			       DATA_BLOCK_CVM_OWNER(rtid));
-	if (hpa == (uint64_t)-1 ||
-	    map_gpa_to_hpa(&g_mem_pool, rtid, block_gpa, hpa, BLOCK_SIZE,
-			   1, PTE_R | PTE_W | PTE_X)) {
+	if (hpa == (uint64_t)-1) {
+		sm_error("[SM] private block allocation failed: rtid=%u "
+			"gpa=0x%lx free=%d total=%d\n",
+			rtid, block_gpa, g_mem_pool.data_pool.free_count,
+			g_mem_pool.data_pool.total_count);
+		ret = -1;
+	} else if (map_gpa_to_hpa(&g_mem_pool, rtid, block_gpa, hpa,
+				   BLOCK_SIZE, 1, PTE_R | PTE_W | PTE_X)) {
+		sm_error("[SM] private block mapping failed: rtid=%u gpa=0x%lx "
+			"hpa=0x%lx mode=%u free=%d total=%d\n",
+			rtid, block_gpa, hpa,
+			get_cvm_pt_mode(&g_mem_pool, rtid),
+			g_mem_pool.data_pool.free_count,
+			g_mem_pool.data_pool.total_count);
 		ret = -1;
 	} else {
 		*block_hpa = hpa;
