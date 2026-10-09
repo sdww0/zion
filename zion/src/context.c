@@ -6,6 +6,7 @@
 #include <sbi/sbi_hfence.h>
 #include <sbi/sbi_timer.h>
 #include <sbi/riscv_asm.h>
+#include <sbi/riscv_atomic.h>
 #include "context.h"
 #include "cvm.h"
 #include "ree.h"
@@ -115,7 +116,7 @@ static const unsigned long enclave_hedeleg =
 	(1U << CAUSE_USER_ECALL) | (1U << CAUSE_FETCH_PAGE_FAULT) |
 	(1U << CAUSE_LOAD_PAGE_FAULT) | (1U << CAUSE_STORE_PAGE_FAULT);
 
-static bool invalid_registers_print = false;
+static atomic_t invalid_registers_print = ATOMIC_INITIALIZER(0);
 static const unsigned long guest_saved_reg_reset_sentinel = 0x1234;
 
 extern void tee_fp_save(struct tee_fp_state *state);
@@ -145,28 +146,43 @@ static bool sanitize_guest_saved_reg(const char *reg_name,
 {
 	if (*reg_value == 0)
 		return false;
+	unsigned long observed = *reg_value;
+	if (observed == guest_saved_reg_reset_sentinel)
+		*reg_value = 0;
+	if (atomic_cmpxchg(&invalid_registers_print, 0, 1))
+		return true;
 
 	/*
 	 * The host-visible shared channel should not drive guest callee-saved
 	 * registers after initial entry. The caller limits this diagnostic to
 	 * the first mismatch so a compromised host cannot flood the console.
 	 */
-	sbi_printf("[SM] TEE security check: %s register mismatch, value: %lx\n",
-		   reg_name, *reg_value);
-	if (*reg_value == guest_saved_reg_reset_sentinel)
-		*reg_value = 0;
-
+	sbi_printf("[ZION VCPU ALERT] hart=%lu source=HOST-SHARED-CHANNEL "
+		   "register=%s expected=0x0 observed=0x%lx\n",
+		   csr_read(mhartid), reg_name, observed);
+	sbi_printf("[ZION VCPU ALERT] classification=SUSPECTED-TAMPER-OR-ABI-MISMATCH "
+		   "not proof of malicious intent; private saved state is retained\n");
 	return true;
 }
 
-static void check_guest_saved_regs(struct kvm_vcpu_channel *channel)
+static void clear_guest_saved_regs(struct kvm_vcpu_channel *channel)
 {
-	if (invalid_registers_print)
+#define CLEAR_SAVED_CHANNEL_REG(label, field) channel->guest_context->field = 0;
+	GUEST_SAVED_REG_SANITY_LIST(CLEAR_SAVED_CHANNEL_REG)
+#undef CLEAR_SAVED_CHANNEL_REG
+}
+
+static void check_guest_saved_regs(struct kvm_vcpu_channel *channel,
+				  unsigned int allowed_offset)
+{
+	if (atomic_read(&invalid_registers_print))
 		return;
 
-#define CHECK_SAVED_REG(label, field)                                          \
-	invalid_registers_print |=                                             \
-		sanitize_guest_saved_reg(label, &channel->guest_context->field);
+#define CHECK_SAVED_REG(label, field)                                      \
+	if (__builtin_offsetof(struct kvm_cpu_context, field) /             \
+	    sizeof(unsigned long) != allowed_offset)                        \
+		sanitize_guest_saved_reg(label,                              \
+			&channel->guest_context->field);
 	GUEST_SAVED_REG_SANITY_LIST(CHECK_SAVED_REG)
 #undef CHECK_SAVED_REG
 }
@@ -196,10 +212,11 @@ static inline void copy_trap_arg_regs_to_guest_context(
 }
 
 static inline void sync_trap_pc_from_guest(struct sbi_trap_regs *regs,
-					   struct kvm_vcpu_channel *channel)
+					   struct kvm_vcpu_channel *channel,
+					   unsigned int allowed_offset)
 {
 	regs->mepc = channel->guest_context->sepc;
-	check_guest_saved_regs(channel);
+	check_guest_saved_regs(channel, allowed_offset);
 }
 
 static inline void get_cvm_status_from_ree(struct sbi_trap_regs *regs,
@@ -211,19 +228,23 @@ static inline void get_cvm_status_from_ree(struct sbi_trap_regs *regs,
 
 	switch (exit_cause) {
 	case CVM_EXIT_MMIO_STORE:
+		/* The store operand was intentionally exported to the host. */
+		sync_trap_pc_from_guest(regs, channel, exit_mmio_reg->rs2_offset);
+		break;
 	case CVM_EXIT_VIRT_INST:
-		sync_trap_pc_from_guest(regs, channel);
+		sync_trap_pc_from_guest(regs, channel, ~0U);
 		break;
 	case CVM_EXIT_MMIO_LOAD:
 		((unsigned long *)regs)[exit_mmio_reg->rd_offset] =
 			((unsigned long *)channel
 				 ->guest_context)[exit_mmio_reg->rd_offset];
-		sync_trap_pc_from_guest(regs, channel);
+		/* The MMIO load destination legitimately contains host device data. */
+		sync_trap_pc_from_guest(regs, channel, exit_mmio_reg->rd_offset);
 		break;
 	case CVM_EXIT_SBI_CALL:
 		copy_guest_arg_regs_to_trap_regs(regs,
 						 channel->guest_context);
-		sync_trap_pc_from_guest(regs, channel);
+		sync_trap_pc_from_guest(regs, channel, ~0U);
 		break;
 	case TEE_INIT:
 		copy_guest_init_regs_to_trap_regs(regs,
@@ -242,6 +263,9 @@ static inline void put_cvm_status_to_ree(struct sbi_trap_regs *regs,
 					 struct kvm_vcpu_channel *channel)
 {
 	channel->guest_context->sstatus = csr_read(CSR_SSTATUS);
+
+	/* Do not mistake a previous MMIO operand for a new host modification. */
+	clear_guest_saved_regs(channel);
 
 	if (extra_trap) {
 		channel->extra_trap->htinst	= extra_trap->htinst;
