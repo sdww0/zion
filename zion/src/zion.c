@@ -1,6 +1,7 @@
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_hart.h>
+#include <sbi/sbi_version.h>
 #include <sbi/riscv_barrier.h>
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_encoding.h>
@@ -37,9 +38,35 @@ static int high_addr_guard_region_id = -1;
 /* Defined in tee-sbi-opensbi.c — unified CVM + Enclave handler */
 extern struct sbi_ecall_extension ecall_zion_tee;
 
+static void zion_print_banner(void)
+{
+	sbi_printf("\n"
+		   "============================================================\n"
+		   "  ZZZZZZZ   IIIIIII    OOOOO    NN    NN\n"
+		   "      ZZ      III     OO   OO   NNN   NN\n"
+		   "    ZZ        III     OO   OO   NN NN NN\n"
+		   "  ZZ          III     OO   OO   NN   NNN\n"
+		   "  ZZZZZZZ   IIIIIII    OOOOO    NN    NN\n"
+		   "  Zion Security Monitor | CVM + Nested Enclave\n"
+		   "============================================================\n");
+	sbi_printf("[ZION BOOT] OpenSBI=%u.%u hart=%lu H=%s\n",
+		   OPENSBI_VERSION_MAJOR, OPENSBI_VERSION_MINOR,
+		   csr_read(mhartid), misa_extension('H') ? "yes" : "no");
+#ifdef OPENSBI_VERSION_GIT
+	sbi_printf("[ZION BOOT] revision=%s\n", OPENSBI_VERSION_GIT);
+#endif
+#ifdef ZION_INSECURE_TEST_KEYS
+	sbi_printf("[ZION BOOT] identity=INSECURE-TEST-KEYS not-for-production\n");
+#else
+	sbi_printf("[ZION BOOT] identity=platform-provider\n");
+#endif
+	sbi_printf("[ZION BOOT] state=INITIALIZING (not a security-test PASS)\n");
+}
+
 void zion_init(bool cold_boot)
 {
 	if (cold_boot) {
+		zion_print_banner();
 #ifdef ZION_MEGREZ_ACTIVATE
 		uintptr_t alias = 0;
 #endif
@@ -51,6 +78,7 @@ void zion_init(bool cold_boot)
 		 * intentionally leaves the ordinary OpenSBI -> U-Boot/Linux path alive. */
 		if (platform_security_preflight() !=
 		    SBI_ERR_SM_ENCLAVE_SUCCESS) {
+			sbi_printf("[ZION BOOT] state=DISABLED preflight failed or probe-only\n");
 			zion_init_done = ZION_INIT_DISABLED;
 			mb();
 			return;
@@ -149,8 +177,11 @@ void zion_init(bool cold_boot)
 	csr_write(CSR_MCOUNTEREN, 0x7);
 	csr_write(CSR_SCOUNTEREN, 0x7);
 
-	if (cold_boot)
+	if (cold_boot) {
 		tee_log("[SBI] Zion TEE initialized\n");
+		sbi_printf("[ZION BOOT] state=READY CVM/enclave SBI registered; "
+			   "runtime validation still required\n");
+	}
 }
 
 void zion_pmp_reconfigure(void)
