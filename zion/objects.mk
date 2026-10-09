@@ -18,6 +18,13 @@ ifneq ($(filter 1 y yes true,$(ZION_INSECURE_TEST_KEYS)),)
 platform-genflags-y += -DZION_INSECURE_TEST_KEYS
 endif
 
+# Test packages may inject an ephemeral device identity without modifying the
+# checked-in regression key. The header path must be visible in the build
+# environment (for example, below the mounted workspace in a container).
+ifneq ($(strip $(ZION_TEST_KEY_HEADER)),)
+platform-genflags-y += -DZION_TEST_KEY_HEADER=\"$(ZION_TEST_KEY_HEADER)\"
+endif
+
 # Megrez bring-up builds enable an early, non-destructive H/PMP capability
 # check. Failure keeps the normal OpenSBI boot chain alive but leaves the Zion
 # SBI extension unregistered.

@@ -255,7 +255,11 @@ void platform_switch_from_enclave(struct enclave *enclave) {}
 #error "Zion platform key provider is not provisioned; use ZION_INSECURE_TEST_KEYS=1 only for test images"
 #endif
 
+#ifdef ZION_TEST_KEY_HEADER
+#include ZION_TEST_KEY_HEADER
+#else
 #include "test_dev_key.h"
+#endif
 
 static const byte test_sm_seed[32] = {
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -539,7 +543,7 @@ void sm_copy_key(void)
 	size_t measured_size = (uintptr_t)_fw_rw_start -
 			       (uintptr_t)_fw_start;
 
-	sbi_printf("[ZION] WARNING: deterministic insecure test keys enabled; "
+	sbi_printf("[ZION] WARNING: insecure test keys enabled; "
 		   "do not deploy this firmware\n");
 
 	/* Explicit test identity. Production platforms must replace this seed, the
