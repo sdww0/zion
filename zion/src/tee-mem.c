@@ -642,19 +642,29 @@ static int map_gpa_to_hpa_internal(mem_pool_t *mp, int cvm_id, uint64_t gpa,
 		page_table_mode = owner >= 0 ?
 			mp->pt_pool.roots[owner].pt_mode : CVM_GSTAGE_MODE;
 	} else {
+		sm_error("[SM] G-stage map rejected invalid owner=%d\n", cvm_id);
 		return -1;
 	}
 
 	if (!root_pt || gstage_levels(page_table_mode) < 0 || target_level < 0 ||
 	    target_level >= gstage_levels(page_table_mode) ||
 	    (permissions & ~PTE_LEAF_PERM_MASK) || !(permissions & PTE_R) ||
-	    ((permissions & PTE_W) && !(permissions & PTE_R)))
+	    ((permissions & PTE_W) && !(permissions & PTE_R))) {
+		sm_error("[SM] G-stage map rejected: owner=%d root=0x%lx mode=%u "
+			"level=%d perm=0x%lx\n",
+			cvm_id, (unsigned long)root_pt, page_table_mode,
+			target_level, permissions);
 		return -1;
+	}
 
 	page_size = PAGE_SIZE << (target_level * gstage_index_bits);
 	if (!size || size % page_size || (gpa & (page_size - 1)) ||
-	    (hpa & (page_size - 1)) || gpa + size < gpa || hpa + size < hpa)
+	    (hpa & (page_size - 1)) || gpa + size < gpa || hpa + size < hpa) {
+		sm_error("[SM] G-stage map alignment failure: owner=%d gpa=0x%lx "
+			"hpa=0x%lx size=0x%lx page=0x%lx\n",
+			cvm_id, gpa, hpa, (unsigned long)size, page_size);
 		return -1;
+	}
 
 	/* G-stage accesses use user permissions, matching Linux KVM's
 	 * _PAGE_BASE mappings. PTE_U is therefore architectural here, not a
@@ -669,12 +679,22 @@ static int map_gpa_to_hpa_internal(mem_pool_t *mp, int cvm_id, uint64_t gpa,
 			page_table_mode, replace);
 		pte_t new_entry;
 
-		if (!entry)
+		if (!entry) {
+			sm_error("[SM] G-stage page-table walk failed: owner=%d "
+				"gpa=0x%lx level=%d mode=%u\n",
+				cvm_id, gpa + offset, target_level,
+				page_table_mode);
 			return -1;
+		}
 		new_entry = (((hpa + offset) >> PAGE_SHIFT)
 			     << ZION_PTE_PPN_SHIFT) | flags;
-		if (!replace && *entry && *entry != new_entry)
+		if (!replace && *entry && *entry != new_entry) {
+			sm_error("[SM] G-stage mapping conflict: owner=%d gpa=0x%lx "
+				"old=0x%lx new=0x%lx level=%d\n",
+				cvm_id, gpa + offset, *entry, new_entry,
+				target_level);
 			return -1;
+		}
 		*entry = new_entry;
 	}
 
@@ -757,11 +777,11 @@ static void report_smm_region_access(uint64_t hpa)
 	uint64_t vcpu_start = (uint64_t)&tee_threads[0];
 	uint64_t vcpu_end = (uint64_t)&tee_threads[MAX_TEE_THREADS];
 
-	tee_log(
+	sbi_printf(
 		"[SM] TEE security check: The hypervisor is trying to access the SM region\n");
 
 	if (address_in_range(hpa, vcpu_start, vcpu_end)) {
-		tee_log(
+		sbi_printf(
 			"[SM] TEE security check: The hypervisor is trying to access the vCPU region\n");
 	}
 }
@@ -788,9 +808,9 @@ static void report_protected_region_access(uint64_t hpa, unsigned long mcause)
 	if (!matched)
 		return;
 
-	tee_log(
+	sbi_printf(
 		"[SM] TEE security check: the hypervisor is trying to r/w the protected region\n");
-	tee_log("[SM] TEE security check: extent=%u physical address=%lx\n",
+	sbi_printf("[SM] TEE security check: extent=%u physical address=%lx\n",
 		matched->info.id, hpa);
 
 	page_table_end = (uintptr_t)g_mem_pool.pt_pool.base +
@@ -799,20 +819,20 @@ static void report_protected_region_access(uint64_t hpa, unsigned long mcause)
 	    address_in_range(hpa, (uintptr_t)g_mem_pool.pt_pool.base,
 			     page_table_end)) {
 		if (mcause == CAUSE_LOAD_ACCESS) {
-			tee_log(
+			sbi_printf(
 				"[SM] TEE security check: The hypervisor is trying to read the page table region\n");
 		} else if (mcause == CAUSE_STORE_ACCESS) {
-			tee_log(
+			sbi_printf(
 				"[SM] TEE security check: The hypervisor is trying to write the page table region\n");
 		}
 		return;
 	}
 
 	if (mcause == CAUSE_LOAD_ACCESS) {
-		tee_log(
+		sbi_printf(
 			"[SM] TEE security check: The hypervisor is trying to read the CVM private memory\n");
 	} else if (mcause == CAUSE_STORE_ACCESS) {
-		tee_log(
+		sbi_printf(
 			"[SM] TEE security check: The hypervisor is trying to write the CVM private memory\n");
 	}
 }
@@ -1178,7 +1198,7 @@ void tee_security_check(unsigned long mtval, unsigned long mcause,
 	unsigned long mode = (raw_root_pt >> ZION_SATP_MODE_SHIFT) &
 			      ZION_SATP_MODE_MASK;
 
-	tee_log(
+	sbi_printf(
 		"[SM] TEE security check: Info: mtval=%lx, mcause=%lx, root_pt: %lx, mode: %lx\n",
 		mtval, mcause, root_pt, mode);
 
@@ -1187,7 +1207,7 @@ void tee_security_check(unsigned long mtval, unsigned long mcause,
 
 	if (!resolve_hpa_for_security_check(root_pt, mode, mtval, &hpa, &pte))
 		return;
-	tee_log("[SM] The hpa: 0x%lx, with permission: %lx\n", hpa,
+	sbi_printf("[SM] The hpa: 0x%lx, with permission: %lx\n", hpa,
 		   *pte & ZION_PTE_FLAG_MASK);
 
 	uint64_t smm_start = SMM_BASE;
